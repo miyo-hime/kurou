@@ -19,21 +19,29 @@ use serenity::model::id::GuildId;
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::AuthConfig;
-use crate::config::Config;
+use crate::config::{Config, GatewayMode};
 use crate::discord::DiscordClient;
+use crate::gateway::GatewayConfig;
+use crate::mentions::MentionStore;
 
 #[derive(Clone, Debug)]
 pub struct KurouServer {
     pub(crate) client: DiscordClient,
     pub(crate) default_guild: Option<GuildId>,
+    pub(crate) mention_store: Option<MentionStore>,
     tool_router: ToolRouter<Self>,
 }
 
 impl KurouServer {
-    pub fn new(client: DiscordClient, default_guild: Option<GuildId>) -> Self {
+    pub fn new(
+        client: DiscordClient,
+        default_guild: Option<GuildId>,
+        mention_store: Option<MentionStore>,
+    ) -> Self {
         Self {
             client,
             default_guild,
+            mention_store,
             tool_router: Self::tool_router(),
         }
     }
@@ -43,6 +51,7 @@ impl KurouServer {
             + tools::info::router()
             + tools::channels::router()
             + tools::messages::router()
+            + tools::mentions::router()
             + tools::send::router()
             + tools::users::router()
     }
@@ -51,27 +60,44 @@ impl KurouServer {
 #[tool_handler(
     router = self.tool_router,
     name = "kurou",
-    version = "0.3.0",
-    instructions = "a small window into a discord server. crow on the wire. get_server_info, list_channels, read_messages, send_message, get_user_id_by_name."
+    version = "0.4.0",
+    instructions = "a small window into a discord server. crow on the wire. get_server_info, list_channels, read_messages, check_mentions, mark_mentions_seen, send_message, get_user_id_by_name."
 )]
 impl ServerHandler for KurouServer {}
 
 pub async fn run_stdio(config: Config) -> Result<()> {
     let token = config
         .discord_token
-        .context("DISCORD_TOKEN is required (no token, no window)")?;
+        .as_deref()
+        .filter(|token| !token.trim().is_empty())
+        .context("DISCORD_TOKEN is required (no token, no window)")?
+        .to_string();
     let default_guild = config
         .discord_guild_id
         .as_deref()
         .map(parse_guild_id)
         .transpose()?;
 
+    let mention_store = mention_store(&config).await?;
+    let gateway = crate::gateway::spawn_gateway(
+        token.clone(),
+        GatewayConfig {
+            mode: config.gateway_mode,
+            default_guild,
+            mention_keywords: config.mention_keywords.clone(),
+            mention_store: mention_store.clone(),
+        },
+    );
+
     let client = DiscordClient::new(&token);
-    let service = KurouServer::new(client, default_guild)
+    let service = KurouServer::new(client, default_guild, mention_store)
         .serve(stdio())
         .await?;
     tracing::info!("kurou running on stdio");
     service.waiting().await?;
+    if let Some(gateway) = gateway {
+        gateway.abort();
+    }
     Ok(())
 }
 
@@ -88,6 +114,16 @@ pub async fn run_http(config: Config) -> Result<()> {
         .map(parse_guild_id)
         .transpose()?;
     let bind_addr: std::net::SocketAddr = (config.host, config.port).into();
+    let mention_store = mention_store(&config).await?;
+    let gateway = crate::gateway::spawn_gateway(
+        token.clone(),
+        GatewayConfig {
+            mode: config.gateway_mode,
+            default_guild,
+            mention_keywords: config.mention_keywords.clone(),
+            mention_store: mention_store.clone(),
+        },
+    );
     let allowed_hosts = allowed_hosts(&config);
     let allowed_origins = config.allowed_origins.clone();
     let auth = Arc::new(AuthConfig::new(
@@ -102,7 +138,13 @@ pub async fn run_http(config: Config) -> Result<()> {
         .with_cancellation_token(cancellation.child_token());
     let service: StreamableHttpService<KurouServer, LocalSessionManager> =
         StreamableHttpService::new(
-            move || Ok(KurouServer::new(DiscordClient::new(&token), default_guild)),
+            move || {
+                Ok(KurouServer::new(
+                    DiscordClient::new(&token),
+                    default_guild,
+                    mention_store.clone(),
+                ))
+            },
             Default::default(),
             http_config,
         );
@@ -188,6 +230,10 @@ pub async fn run_http(config: Config) -> Result<()> {
         })
         .await?;
 
+    if let Some(gateway) = gateway {
+        gateway.abort();
+    }
+
     Ok(())
 }
 
@@ -213,4 +259,18 @@ fn allowed_hosts(config: &Config) -> Vec<String> {
         host,
         bind_addr,
     ]
+}
+
+async fn mention_store(config: &Config) -> Result<Option<MentionStore>> {
+    if config.gateway_mode != GatewayMode::Mentions {
+        return Ok(None);
+    }
+
+    let store = MentionStore::new(config.mention_db_path.clone());
+    store.initialize().await?;
+    tracing::info!(
+        path = %config.mention_db_path.display(),
+        "mention inbox initialized"
+    );
+    Ok(Some(store))
 }

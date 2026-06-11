@@ -1,0 +1,170 @@
+use anyhow::{Context as _, Result};
+use serenity::async_trait;
+use serenity::client::{Client, Context, EventHandler};
+use serenity::model::channel::Message;
+use serenity::model::gateway::{GatewayIntents, Ready};
+use serenity::model::id::{GuildId, UserId};
+use serenity::model::user::OnlineStatus;
+use tokio::task::JoinHandle;
+
+use crate::config::GatewayMode;
+use crate::mentions::{MentionStore, NewMention};
+
+#[derive(Clone, Debug)]
+pub struct GatewayConfig {
+    pub mode: GatewayMode,
+    pub default_guild: Option<GuildId>,
+    pub mention_keywords: Vec<String>,
+    pub mention_store: Option<MentionStore>,
+}
+
+pub fn spawn_gateway(token: String, config: GatewayConfig) -> Option<JoinHandle<()>> {
+    if config.mode == GatewayMode::Off {
+        return None;
+    }
+
+    Some(tokio::spawn(async move {
+        if let Err(error) = run_gateway(&token, config).await {
+            tracing::error!(%error, "discord gateway stopped");
+        }
+    }))
+}
+
+async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
+    let bot_user_id = serenity::http::Http::new(token)
+        .get_current_user()
+        .await
+        .context("failed to fetch current bot user before gateway start")?
+        .id;
+    let intents = match config.mode {
+        GatewayMode::Off => GatewayIntents::empty(),
+        GatewayMode::Presence => GatewayIntents::GUILDS,
+        GatewayMode::Mentions => {
+            GatewayIntents::GUILDS
+                | GatewayIntents::GUILD_MESSAGES
+                | GatewayIntents::MESSAGE_CONTENT
+        }
+    };
+
+    let handler = Handler {
+        mode: config.mode,
+        bot_user_id,
+        default_guild: config.default_guild,
+        mention_keywords: normalize_keywords(config.mention_keywords),
+        mention_store: config.mention_store,
+    };
+    let mut client = Client::builder(token, intents)
+        .event_handler(handler)
+        .await
+        .context("failed to create discord gateway client")?;
+
+    tracing::info!(mode = ?config.mode, "discord gateway starting");
+    client
+        .start()
+        .await
+        .context("discord gateway client failed")
+}
+
+#[derive(Clone, Debug)]
+struct Handler {
+    mode: GatewayMode,
+    bot_user_id: UserId,
+    default_guild: Option<GuildId>,
+    mention_keywords: Vec<String>,
+    mention_store: Option<MentionStore>,
+}
+
+#[async_trait]
+impl EventHandler for Handler {
+    async fn ready(&self, ctx: Context, ready: Ready) {
+        ctx.set_presence(None, OnlineStatus::Online);
+        tracing::info!(
+            user = %ready.user.name,
+            user_id = %ready.user.id,
+            mode = ?self.mode,
+            "discord gateway ready"
+        );
+    }
+
+    async fn message(&self, _ctx: Context, message: Message) {
+        if self.mode != GatewayMode::Mentions {
+            return;
+        }
+        if message.author.id == self.bot_user_id {
+            return;
+        }
+        if self
+            .default_guild
+            .is_some_and(|guild| message.guild_id != Some(guild))
+        {
+            return;
+        }
+
+        let Some(store) = &self.mention_store else {
+            tracing::warn!("mention gateway mode is enabled without a mention store");
+            return;
+        };
+        let matched = matched_terms(&message, self.bot_user_id, &self.mention_keywords);
+        if matched.is_empty() {
+            return;
+        }
+
+        let mention = NewMention {
+            message_id: message.id.to_string(),
+            guild_id: message.guild_id.map(|id| id.to_string()),
+            channel_id: message.channel_id.to_string(),
+            author_id: message.author.id.to_string(),
+            author_name: message.author.name.clone(),
+            author_display_name: display_name(&message),
+            content: message.content.clone(),
+            matched: matched.join(","),
+            timestamp: message.timestamp.to_string(),
+            link: message.id.link(message.channel_id, message.guild_id),
+        };
+
+        match store.insert(mention).await {
+            Ok(true) => tracing::info!(
+                message_id = %message.id,
+                channel_id = %message.channel_id,
+                author_id = %message.author.id,
+                "stored mention"
+            ),
+            Ok(false) => {}
+            Err(error) => tracing::error!(%error, "failed to store mention"),
+        }
+    }
+}
+
+fn normalize_keywords(keywords: Vec<String>) -> Vec<String> {
+    keywords
+        .into_iter()
+        .map(|keyword| keyword.trim().to_lowercase())
+        .filter(|keyword| !keyword.is_empty())
+        .collect()
+}
+
+fn matched_terms(message: &Message, bot_user_id: UserId, keywords: &[String]) -> Vec<String> {
+    let mut matched = Vec::new();
+    if message.mentions.iter().any(|user| user.id == bot_user_id) {
+        matched.push("mention".to_string());
+    }
+
+    let content = message.content.to_lowercase();
+    for keyword in keywords {
+        if content.contains(keyword) && !matched.iter().any(|item| item == keyword) {
+            matched.push(keyword.clone());
+        }
+    }
+
+    matched
+}
+
+fn display_name(message: &Message) -> Option<String> {
+    message.member.as_ref().and_then(|member| {
+        member
+            .nick
+            .clone()
+            .or_else(|| message.author.global_name.clone())
+            .filter(|name| name != &message.author.name)
+    })
+}

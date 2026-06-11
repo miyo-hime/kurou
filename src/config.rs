@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
@@ -6,6 +7,13 @@ use clap::{Parser, ValueEnum};
 pub enum TransportMode {
     Stdio,
     Http,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum GatewayMode {
+    Off,
+    Presence,
+    Mentions,
 }
 
 #[derive(Clone, Debug, Parser)]
@@ -48,4 +56,22 @@ pub struct Config {
         default_value = "http://127.0.0.1:3000"
     )]
     pub public_base_url: String,
+
+    #[arg(long = "gateway-mode", env = "GATEWAY_MODE", default_value = "off")]
+    pub gateway_mode: GatewayMode,
+
+    #[arg(
+        long = "mention-db-path",
+        env = "MENTION_DB_PATH",
+        default_value = "mentions.sqlite3"
+    )]
+    pub mention_db_path: PathBuf,
+
+    #[arg(
+        long = "mention-keyword",
+        env = "MENTION_KEYWORDS",
+        value_delimiter = ',',
+        default_value = "koma"
+    )]
+    pub mention_keywords: Vec<String>,
 }

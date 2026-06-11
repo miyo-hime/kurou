@@ -1,6 +1,8 @@
 mod auth;
 mod config;
 mod discord;
+mod gateway;
+mod mentions;
 mod oauth;
 mod server;
 

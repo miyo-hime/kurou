@@ -27,7 +27,7 @@ pub struct GetUserIdByNameRequest {
 impl KurouServer {
     #[tool(
         name = "get_user_id_by_name",
-        description = "Search guild members by username or nickname prefix and return matching user ids."
+        description = "Search guild members by username or nickname prefix and return ids, display names, nicknames, and mention strings."
     )]
     pub async fn get_user_id_by_name(
         &self,

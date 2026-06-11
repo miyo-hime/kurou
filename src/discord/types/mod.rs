@@ -243,14 +243,19 @@ pub struct UserLookupInfo {
     pub id: String,
     pub username: String,
     pub nickname: Option<String>,
+    pub display_name: String,
+    pub mention: String,
 }
 
 impl From<Member> for UserLookupInfo {
     fn from(m: Member) -> Self {
+        let display_name = m.display_name().to_string();
         Self {
             id: m.user.id.to_string(),
+            mention: format!("<@{}>", m.user.id),
             username: m.user.name,
             nickname: m.nick,
+            display_name,
         }
     }
 }

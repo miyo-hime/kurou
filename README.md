@@ -1,6 +1,6 @@
 # kurou 烏
 
-![version](https://img.shields.io/badge/v0.3.0-orange)
+![version](https://img.shields.io/badge/v0.4.0-orange)
 ![built with rust](https://img.shields.io/badge/Rust-CE412B?logo=rust&logoColor=white)
 ![mcp](https://img.shields.io/badge/MCP-rmcp-purple)
 
@@ -8,10 +8,11 @@
 > dim window into one discord server.
 
 a tiny rust MCP server that lets an assistant peek at a discord server and, when it
-has something to say, say it. five tools, no more. it talks to discord over the REST
-api only - **no gateway, no websocket** - so it can read, it can post, but it can
-never be pinged, mentioned, or summoned by anyone in the server. it watches; it
-doesn't get watched back.
+has something to say, say it. seven tools, no more. by default it talks to discord
+over the REST api only - **no gateway, no websocket** - so it can read, it can post,
+but it can never be pinged, mentioned, or summoned by anyone in the server. if you
+opt into gateway mode, it can appear online and collect a tiny mention inbox without
+ever auto-replying.
 
 this is a personal tool. it started as a ~5-tool rewrite of the ~50-tool
 [SaseQ/discord-mcp](https://github.com/SaseQ/discord-mcp) (java/spring/JDA), trimmed
@@ -22,11 +23,12 @@ own risk.
 ## what you get
 
 - streamable MCP over **stdio** (local) or **HTTP** (hosted)
-- five tools: read server info, list channels, read messages, send a message, find a user id
+- seven tools: read server info, list channels, read messages, check mentions, mark mentions seen, send a message, find a user id
 - compact message blocks built for an LLM to read, author ids inline
 - bearer auth + a tiny PKCE OAuth shim for hosted HTTP
-- structurally un-summonable: REST only, the gateway is never opened
-- one small static binary, rustls (no openssl), no runtime to install
+- structurally un-summonable by default: REST only, the gateway is never opened unless you ask for it
+- optional gateway presence/mention mode for online status and a pull-based mention inbox
+- one small static binary, rustls (no openssl), bundled sqlite when mention mode is enabled
 
 it can post messages. that's a real action in a real server. `send_message` exists
 because the whole point was letting the crow drop the occasional remark, but it's an
@@ -82,13 +84,51 @@ precision and nobody wants that bug.
 | `get_server_info` | no | guild name, id, member count, description |
 | `list_channels` | no | every channel with id, name, kind (Text/Voice/Category/Forum/...), and topic |
 | `read_messages` | no | recent messages from a channel as compact blocks, newest first, author ids inline; reactions/attachments/stickers/embeds when present. `limit` clamps 1-100 (default 50) |
+| `check_mentions` | no | reads the collected mention inbox when `GATEWAY_MODE=mentions`. `limit` clamps 1-100 (default 20) |
+| `mark_mentions_seen` | yes-ish | marks mention inbox rows as seen. pass `ids`, or omit them to mark all unseen rows |
 | `send_message` | **yes** | posts to a channel. up to discord's 2000 chars. this changes the server |
-| `get_user_id_by_name` | no | prefix-search guild members by username/nick, returns matching user ids. `limit` 1-100 (default 10) |
+| `get_user_id_by_name` | no | prefix-search guild members by username/nick, returns ids, display names, nicknames, and `<@id>` mention strings. `limit` 1-100 (default 10) |
 
 `list_channels` returns *all* channels, not just text ones - a read window is more
 useful seeing the whole layout, and the `kind` field tells you what each one is.
 `get_user_id_by_name` is prefix search (that's what discord's REST endpoint gives
 you), so it's good for finding people, not for fuzzy magic.
+
+## gateway mode
+
+default is still fully REST-only:
+
+```env
+GATEWAY_MODE=off
+```
+
+if you want Koma to appear online but remain uninterruptible:
+
+```env
+GATEWAY_MODE=presence
+```
+
+if you also want the little pull-based inbox for `koma` sightings:
+
+```env
+GATEWAY_MODE=mentions
+MENTION_KEYWORDS=koma
+MENTION_DB_PATH=/var/lib/kurou/mentions.sqlite3
+```
+
+`mentions` mode opens the Discord gateway with message events and message content
+intent. the bot needs that privileged intent enabled in Discord's developer portal
+if you want keyword matches like `koma`; direct bot mentions can still be detected
+from Discord's mention metadata when Discord sends it. the inbox is SQLite via
+`rusqlite`'s bundled SQLite, so the systemd service does not need a separate sqlite
+package. it is just the binary and a db file.
+
+systemd-friendly storage:
+
+```ini
+StateDirectory=kurou
+Environment=MENTION_DB_PATH=/var/lib/kurou/mentions.sqlite3
+```
 
 ## hosted http
 
@@ -164,16 +204,23 @@ TRANSPORT=http
 | `AUTH_TOKENS` | `--auth-token` | empty | comma-separated `label:token` for http bearer auth |
 | `OAUTH_TOKEN_LABEL` | `--oauth-token-label` | first auth token | which `AUTH_TOKENS` label the oauth shim issues |
 | `PUBLIC_BASE_URL` | `--public-base-url` | `http://127.0.0.1:3000` | external base url used in auth metadata |
+| `GATEWAY_MODE` | `--gateway-mode` | `off` | `off`, `presence`, or `mentions` |
+| `MENTION_DB_PATH` | `--mention-db-path` | `mentions.sqlite3` | sqlite file used by `GATEWAY_MODE=mentions` |
+| `MENTION_KEYWORDS` | `--mention-keyword` | `koma` | comma-separated keyword list for the mention inbox |
 | `RUST_LOG` | n/a | unset | try `kurou=info` when something's quiet |
 
 ## the un-summonable thing
 
 most discord bots open a gateway websocket so they can receive events in real time.
-kurou never does. it makes plain REST calls and goes back to sleep. the upside isn't
-just a smaller binary - it means the assistant behind it can't be mentioned, replied
-at, or dragged into a conversation by server members. it's a one-way mirror on
-purpose. the tradeoff is no live events and no group chat; if you want those, this is
-the wrong tool and you want the gateway you just turned off.
+kurou does not do that unless `GATEWAY_MODE` says so. in `off` mode, it makes plain
+REST calls and goes back to sleep. the upside isn't just a smaller binary - it means
+the assistant behind it can't be mentioned, replied at, or dragged into a
+conversation by server members. it's a one-way mirror on purpose.
+
+`presence` mode opens the gateway just long enough to stay connected and show online.
+`mentions` mode also listens for new messages and stores matches in SQLite for later
+inspection. neither mode replies to Discord events. Koma still checks the tray only
+when she chooses.
 
 (serenity still drags `tokio-tungstenite` into the build through an unrelated feature,
 but the `gateway` feature is off, so no shard or event loop ever compiles in. the ws
@@ -214,7 +261,8 @@ MCP client  <->  kurou  <->  discord REST api
 
 - rust + tokio
 - `rmcp` for MCP (pinned `=1.6.0` on purpose - the caret floats to 1.7 and breaks the schemars gating)
-- `serenity` (`http` feature only, gateway off) for typed discord models
+- `serenity` for typed discord models, REST calls, and optional gateway presence
+- `rusqlite` with bundled SQLite for the optional mention inbox
 - `axum` for the http transport, rustls all the way down
 - `serde` / `schemars` for payloads and tool schemas
 
