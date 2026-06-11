@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use serenity::builder::CreateMessage;
 use serenity::http::Http;
 use serenity::model::channel::{GuildChannel, Message};
+use serenity::model::guild::Member;
 use serenity::model::guild::PartialGuild;
 use serenity::model::id::{ChannelId, GuildId};
 
@@ -30,6 +32,22 @@ impl DiscordClient {
         Ok(self
             .http
             .get_messages(channel_id, None, Some(limit))
+            .await?)
+    }
+
+    pub async fn send_message(&self, channel_id: ChannelId, content: &str) -> Result<Message> {
+        let builder = CreateMessage::new().content(content);
+        Ok(channel_id.send_message(&self.http, builder).await?)
+    }
+
+    pub async fn search_members(
+        &self,
+        guild_id: GuildId,
+        query: &str,
+        limit: u64,
+    ) -> Result<Vec<Member>> {
+        Ok(guild_id
+            .search_members(&self.http, query, Some(limit))
             .await?)
     }
 }

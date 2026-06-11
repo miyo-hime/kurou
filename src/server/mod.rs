@@ -31,6 +31,8 @@ impl KurouServer {
             + tools::info::router()
             + tools::channels::router()
             + tools::messages::router()
+            + tools::send::router()
+            + tools::users::router()
     }
 }
 
@@ -38,7 +40,7 @@ impl KurouServer {
     router = self.tool_router,
     name = "kurou",
     version = "0.1.0",
-    instructions = "a read-only window into a discord server. crow on the wire. get_server_info, list_channels, read_messages."
+    instructions = "a small window into a discord server. crow on the wire. get_server_info, list_channels, read_messages, send_message, get_user_id_by_name."
 )]
 impl ServerHandler for KurouServer {}
 

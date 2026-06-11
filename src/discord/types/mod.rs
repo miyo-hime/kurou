@@ -1,5 +1,6 @@
 use serde::Serialize;
 use serenity::model::channel::{GuildChannel, Message};
+use serenity::model::guild::Member;
 use serenity::model::guild::PartialGuild;
 
 #[derive(Serialize)]
@@ -57,6 +58,23 @@ impl From<Message> for MessageInfo {
             author_name: m.author.name,
             content: m.content,
             timestamp: m.timestamp.to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct UserLookupInfo {
+    pub id: String,
+    pub username: String,
+    pub nickname: Option<String>,
+}
+
+impl From<Member> for UserLookupInfo {
+    fn from(m: Member) -> Self {
+        Self {
+            id: m.user.id.to_string(),
+            username: m.user.name,
+            nickname: m.nick,
         }
     }
 }
