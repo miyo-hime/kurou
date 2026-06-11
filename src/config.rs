@@ -25,4 +25,27 @@ pub struct Config {
 
     #[arg(long, env = "HOST", default_value = "127.0.0.1")]
     pub host: IpAddr,
+
+    #[arg(long = "allowed-host", env = "ALLOWED_HOSTS", value_delimiter = ',')]
+    pub allowed_hosts: Vec<String>,
+
+    #[arg(
+        long = "allowed-origin",
+        env = "ALLOWED_ORIGINS",
+        value_delimiter = ','
+    )]
+    pub allowed_origins: Vec<String>,
+
+    #[arg(long = "auth-token", env = "AUTH_TOKENS", value_delimiter = ',')]
+    pub auth_tokens: Vec<String>,
+
+    #[arg(long = "oauth-token-label", env = "OAUTH_TOKEN_LABEL")]
+    pub oauth_token_label: Option<String>,
+
+    #[arg(
+        long = "public-base-url",
+        env = "PUBLIC_BASE_URL",
+        default_value = "http://127.0.0.1:3000"
+    )]
+    pub public_base_url: String,
 }

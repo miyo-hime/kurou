@@ -1,5 +1,7 @@
+mod auth;
 mod config;
 mod discord;
+mod oauth;
 mod server;
 
 use anyhow::Result;
@@ -17,6 +19,6 @@ async fn main() -> Result<()> {
 
     match config.transport {
         TransportMode::Stdio => server::run_stdio(config).await,
-        TransportMode::Http => anyhow::bail!("http transport lands in phase 3, use stdio"),
+        TransportMode::Http => server::run_http(config).await,
     }
 }
