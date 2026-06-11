@@ -39,7 +39,7 @@ impl KurouServer {
 #[tool_handler(
     router = self.tool_router,
     name = "kurou",
-    version = "0.1.0",
+    version = "0.2.0",
     instructions = "a small window into a discord server. crow on the wire. get_server_info, list_channels, read_messages, send_message, get_user_id_by_name."
 )]
 impl ServerHandler for KurouServer {}
