@@ -1,4 +1,5 @@
 mod config;
+mod discord;
 mod server;
 
 use anyhow::Result;
