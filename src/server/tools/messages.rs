@@ -3,9 +3,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::discord::types::MessageInfo;
+use crate::discord::types::messages_block;
 use crate::server::KurouServer;
-use crate::server::tools::common::{json_text, parse_channel, tool_error};
+use crate::server::tools::common::{parse_channel, tool_error};
 
 pub fn router() -> ToolRouter<KurouServer> {
     KurouServer::messages_router()
@@ -23,7 +23,7 @@ pub struct ReadMessagesRequest {
 impl KurouServer {
     #[tool(
         name = "read_messages",
-        description = "Read recent messages from a channel, newest first. Each carries its author's id inline so you can ping them."
+        description = "Read recent messages from a channel as compact message blocks, newest first. Reactions, attachments, stickers, and embeds are included when present."
     )]
     pub async fn read_messages(
         &self,
@@ -37,7 +37,6 @@ impl KurouServer {
             .messages(channel, limit)
             .await
             .map_err(tool_error)?;
-        let infos: Vec<MessageInfo> = messages.into_iter().map(MessageInfo::from).collect();
-        json_text(&infos)
+        Ok(messages_block(&messages))
     }
 }

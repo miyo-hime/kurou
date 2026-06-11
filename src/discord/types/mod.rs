@@ -1,5 +1,9 @@
+use std::fmt::Write as _;
+
 use serde::Serialize;
-use serenity::model::channel::{GuildChannel, Message};
+use serenity::model::channel::{
+    Attachment, Embed, GuildChannel, Message, MessageReaction, ReactionType,
+};
 use serenity::model::guild::Member;
 use serenity::model::guild::PartialGuild;
 
@@ -60,6 +64,178 @@ impl From<Message> for MessageInfo {
             timestamp: m.timestamp.to_string(),
         }
     }
+}
+
+pub fn messages_block(messages: &[Message]) -> String {
+    let mut output = String::new();
+
+    for (index, message) in messages.iter().enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+
+        let _ = writeln!(
+            output,
+            "[id={}, author_id={}, author_name={}, timestamp={}]",
+            message.id,
+            message.author.id,
+            quote_header(&message.author.name),
+            message.timestamp
+        );
+
+        if let Some(edited) = message.edited_timestamp {
+            let _ = writeln!(output, "edited: {edited}");
+        }
+
+        if !message.reactions.is_empty() {
+            let reactions = message
+                .reactions
+                .iter()
+                .map(format_reaction)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(output, "reactions: {reactions}");
+        }
+
+        if !message.attachments.is_empty() {
+            output.push_str("attachments:\n");
+            for attachment in &message.attachments {
+                let _ = writeln!(output, "- {}", format_attachment(attachment));
+            }
+        }
+
+        if !message.sticker_items.is_empty() {
+            output.push_str("stickers:\n");
+            for sticker in &message.sticker_items {
+                let url = sticker.image_url().unwrap_or_else(|| "no-url".to_string());
+                let _ = writeln!(
+                    output,
+                    "- id={} name={} format={:?} url={}",
+                    sticker.id,
+                    quote_header(&sticker.name),
+                    sticker.format_type,
+                    url
+                );
+            }
+        }
+
+        let embed_lines = message
+            .embeds
+            .iter()
+            .filter_map(format_embed)
+            .collect::<Vec<_>>();
+        if !embed_lines.is_empty() {
+            output.push_str("embeds:\n");
+            for embed in embed_lines {
+                let _ = writeln!(output, "- {embed}");
+            }
+        }
+
+        if !message.content.is_empty() {
+            output.push_str(&message.content);
+            if !message.content.ends_with('\n') {
+                output.push('\n');
+            }
+        }
+    }
+
+    output
+}
+
+fn quote_header(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn format_reaction(reaction: &MessageReaction) -> String {
+    format!(
+        "{} x{}",
+        reaction_label(&reaction.reaction_type),
+        reaction.count
+    )
+}
+
+fn reaction_label(reaction_type: &ReactionType) -> String {
+    match reaction_type {
+        ReactionType::Unicode(value) => value.clone(),
+        ReactionType::Custom { animated, id, name } => {
+            let name = name.as_deref().unwrap_or("emoji");
+            if *animated {
+                format!("<a:{name}:{id}>")
+            } else {
+                format!("<:{name}:{id}>")
+            }
+        }
+        _ => format!("{reaction_type:?}"),
+    }
+}
+
+fn format_attachment(attachment: &Attachment) -> String {
+    let mut parts = vec![
+        format!("id={}", attachment.id),
+        format!("filename={}", quote_header(&attachment.filename)),
+        format!("size={}b", attachment.size),
+    ];
+
+    if let Some(content_type) = &attachment.content_type {
+        parts.push(format!("type={}", quote_header(content_type)));
+    }
+
+    if let Some(description) = &attachment.description {
+        parts.push(format!("description={}", quote_header(description)));
+    }
+
+    if let Some((width, height)) = attachment.dimensions() {
+        parts.push(format!("dimensions={}x{}", width, height));
+    }
+
+    parts.push(format!("url={}", attachment.url));
+    parts.join(" ")
+}
+
+fn format_embed(embed: &Embed) -> Option<String> {
+    let mut parts = Vec::new();
+
+    if let Some(kind) = &embed.kind {
+        parts.push(format!("type={}", quote_header(kind)));
+    }
+
+    if let Some(title) = &embed.title {
+        parts.push(format!("title={}", quote_header(title)));
+    }
+
+    if let Some(description) = &embed.description {
+        parts.push(format!(
+            "description={}",
+            quote_header(&short_inline(description))
+        ));
+    }
+
+    if let Some(url) = &embed.url {
+        parts.push(format!("url={url}"));
+    }
+
+    if let Some(image) = &embed.image {
+        parts.push(format!("image={}", image.url));
+    }
+
+    if let Some(thumbnail) = &embed.thumbnail {
+        parts.push(format!("thumbnail={}", thumbnail.url));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+fn short_inline(value: &str) -> String {
+    let mut cleaned = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.chars().count() > 180 {
+        cleaned = cleaned.chars().take(177).collect();
+        cleaned.push_str("...");
+    }
+    cleaned
 }
 
 #[derive(Serialize)]
