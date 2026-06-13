@@ -2,8 +2,15 @@ mod tools;
 
 use std::sync::Arc;
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
-use axum::{Router, middleware, routing::get};
+use axum::{
+    Router,
+    extract::DefaultBodyLimit,
+    middleware,
+    routing::{get, post},
+};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::router::tool::ToolRouter,
@@ -23,12 +30,14 @@ use crate::config::{Config, GatewayMode};
 use crate::discord::DiscordClient;
 use crate::gateway::GatewayConfig;
 use crate::mentions::MentionStore;
+use crate::uploads::UploadStore;
 
 #[derive(Clone, Debug)]
 pub struct KurouServer {
     pub(crate) client: DiscordClient,
     pub(crate) default_guild: Option<GuildId>,
     pub(crate) mention_store: Option<MentionStore>,
+    pub(crate) upload_store: UploadStore,
     tool_router: ToolRouter<Self>,
 }
 
@@ -37,11 +46,13 @@ impl KurouServer {
         client: DiscordClient,
         default_guild: Option<GuildId>,
         mention_store: Option<MentionStore>,
+        upload_store: UploadStore,
     ) -> Self {
         Self {
             client,
             default_guild,
             mention_store,
+            upload_store,
             tool_router: Self::tool_router(),
         }
     }
@@ -60,10 +71,14 @@ impl KurouServer {
 #[tool_handler(
     router = self.tool_router,
     name = "kurou",
-    version = "0.4.0",
+    version = "0.5.0",
     instructions = "a small window into a discord server. crow on the wire. get_server_info, list_channels, read_messages, check_mentions, mark_mentions_seen, send_message, get_user_id_by_name."
 )]
 impl ServerHandler for KurouServer {}
+
+// uploads are meant to be claimed seconds later by send_message. ten minutes is
+// generous slack, not a parking lot.
+const UPLOAD_TTL: Duration = Duration::from_secs(600);
 
 pub async fn run_stdio(config: Config) -> Result<()> {
     let token = config
@@ -90,7 +105,8 @@ pub async fn run_stdio(config: Config) -> Result<()> {
     );
 
     let client = DiscordClient::new(&token);
-    let service = KurouServer::new(client, default_guild, mention_store)
+    let upload_store = UploadStore::new(UPLOAD_TTL);
+    let service = KurouServer::new(client, default_guild, mention_store, upload_store)
         .serve(stdio())
         .await?;
     tracing::info!("kurou running on stdio");
@@ -132,10 +148,12 @@ pub async fn run_http(config: Config) -> Result<()> {
     ));
     let cancellation = CancellationToken::new();
 
+    let upload_store = UploadStore::new(UPLOAD_TTL);
     let http_config = StreamableHttpServerConfig::default()
         .with_allowed_hosts(allowed_hosts.clone())
         .with_allowed_origins(allowed_origins.clone())
         .with_cancellation_token(cancellation.child_token());
+    let factory_store = upload_store.clone();
     let service: StreamableHttpService<KurouServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
@@ -143,13 +161,21 @@ pub async fn run_http(config: Config) -> Result<()> {
                     DiscordClient::new(&token),
                     default_guild,
                     mention_store.clone(),
+                    factory_store.clone(),
                 ))
             },
             Default::default(),
             http_config,
         );
 
-    let mcp_router = Router::new().nest_service("/mcp", service);
+    let upload_route = Router::new()
+        .route("/upload", post(crate::uploads::upload_handler))
+        .layer(DefaultBodyLimit::max(crate::uploads::MAX_UPLOAD_BYTES))
+        .with_state(upload_store);
+
+    let mcp_router = Router::new()
+        .nest_service("/mcp", service)
+        .merge(upload_route);
     let mcp_router = if auth.is_enabled() {
         let auth_for_middleware = auth.clone();
         tracing::info!(

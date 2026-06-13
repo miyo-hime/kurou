@@ -1,6 +1,6 @@
 # kurou 烏
 
-![version](https://img.shields.io/badge/v0.4.0-orange)
+![version](https://img.shields.io/badge/v0.5.0-orange)
 ![built with rust](https://img.shields.io/badge/Rust-CE412B?logo=rust&logoColor=white)
 ![mcp](https://img.shields.io/badge/MCP-rmcp-purple)
 
@@ -86,13 +86,46 @@ precision and nobody wants that bug.
 | `read_messages` | no | recent messages from a channel as compact blocks, newest first, author ids inline; reactions/attachments/stickers/embeds when present. `limit` clamps 1-100 (default 50) |
 | `check_mentions` | no | reads the collected mention inbox when `GATEWAY_MODE=mentions`. `limit` clamps 1-100 (default 20) |
 | `mark_mentions_seen` | yes-ish | marks mention inbox rows as seen. pass `ids`, or omit them to mark all unseen rows |
-| `send_message` | **yes** | posts to a channel. up to discord's 2000 chars. this changes the server |
+| `send_message` | **yes** | posts to a channel. up to discord's 2000 chars, plus optional file attachments. this changes the server |
 | `get_user_id_by_name` | no | prefix-search guild members by username/nick, returns ids, display names, nicknames, and `<@id>` mention strings. `limit` 1-100 (default 10) |
 
 `list_channels` returns *all* channels, not just text ones - a read window is more
 useful seeing the whole layout, and the `kind` field tells you what each one is.
 `get_user_id_by_name` is prefix search (that's what discord's REST endpoint gives
 you), so it's good for finding people, not for fuzzy magic.
+
+## attachments
+
+`send_message` carries files three ways, cheapest first:
+
+- `attachment_urls` - already-hosted http(s) links. the crow fetches them itself.
+- `attachment_refs` - refs from the upload endpoint (see below). the way to attach a
+  local file without the bytes passing through the assistant's context.
+- `attachments_inline` - `{ filename, data_base64 }`. last resort; the bytes ride in
+  the tool call and cost tokens, so reach for a ref or url first.
+
+up to 10 files per message, 25MiB each. content may be empty if at least one file is
+attached.
+
+### the upload endpoint
+
+hosted http mode also exposes `POST /upload` behind the same bearer auth:
+
+```bash
+curl -fsS -X POST "https://kurou.example.com/upload?filename=proof.png" \
+  -H "Authorization: Bearer <token>" \
+  --data-binary @proof.png
+# -> {"ref":"03392...","filename":"proof.png","size":81234,"expires_in_secs":600}
+```
+
+the bytes land in a short-lived in-memory store (~10 min ttl, single-use). hand the
+`ref` to `send_message` as `attachment_refs` and the crow attaches what it already
+holds. the companion plugin in [`companion/kurou-upload`](companion/kurou-upload) wraps
+this into a `/kurou-upload <path>` command so the assistant never courier-carries the
+bytes herself.
+
+if you front the crow with nginx, give `/upload` room to breathe:
+`client_max_body_size 25m;` (the default 1m will bounce real files).
 
 ## gateway mode
 
@@ -173,6 +206,7 @@ some MCP clients want OAuth discovery instead of a hand-set bearer token. when
 | `/authorize` | tiny approval page |
 | `/token` | PKCE authorization-code exchange |
 | `/mcp` | the protected endpoint |
+| `/upload` | stash a file, get a ref for `send_message` (same bearer) |
 
 it issues one configured bearer token. it is compatibility glue, not an identity
 provider - anyone who can reach and approve `/authorize` can mint that token, so put

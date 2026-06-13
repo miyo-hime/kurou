@@ -1,12 +1,17 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use serenity::builder::CreateMessage;
+use serenity::builder::{CreateAttachment, CreateMessage};
 use serenity::http::Http;
 use serenity::model::channel::{GuildChannel, Message};
 use serenity::model::guild::Member;
 use serenity::model::guild::PartialGuild;
 use serenity::model::id::{ChannelId, GuildId};
+
+pub enum AttachmentSource {
+    Url(String),
+    Bytes { filename: String, data: Vec<u8> },
+}
 
 #[derive(Clone)]
 pub struct DiscordClient {
@@ -35,8 +40,25 @@ impl DiscordClient {
             .await?)
     }
 
-    pub async fn send_message(&self, channel_id: ChannelId, content: &str) -> Result<Message> {
-        let builder = CreateMessage::new().content(content);
+    pub async fn send_message(
+        &self,
+        channel_id: ChannelId,
+        content: &str,
+        attachments: Vec<AttachmentSource>,
+    ) -> Result<Message> {
+        let mut builder = CreateMessage::new();
+        if !content.is_empty() {
+            builder = builder.content(content);
+        }
+        for source in attachments {
+            let attachment = match source {
+                AttachmentSource::Url(url) => CreateAttachment::url(&self.http, &url).await?,
+                AttachmentSource::Bytes { filename, data } => {
+                    CreateAttachment::bytes(data, filename)
+                }
+            };
+            builder = builder.add_file(attachment);
+        }
         Ok(channel_id.send_message(&self.http, builder).await?)
     }
 

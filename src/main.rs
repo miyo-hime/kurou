@@ -5,6 +5,7 @@ mod gateway;
 mod mentions;
 mod oauth;
 mod server;
+mod uploads;
 
 use anyhow::Result;
 use clap::Parser;

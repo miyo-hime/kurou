@@ -1,0 +1,9 @@
+{
+  "name": "kurou-upload",
+  "version": "0.1.0",
+  "description": "hand a local file to the kurou crow and get back an attachment ref, so the bytes never ride through koma's context (and never cost tokens)",
+  "author": {
+    "name": "Chroma",
+    "email": "chroma@kurobox.me"
+  }
+}
