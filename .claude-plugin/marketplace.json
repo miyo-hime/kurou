@@ -1,0 +1,23 @@
+{
+  "name": "kurou",
+  "owner": {
+    "name": "Chroma",
+    "email": "chroma@kurobox.me"
+  },
+  "metadata": {
+    "description": "the crow's companion tooling",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "kurou-upload",
+      "source": "./companion/kurou-upload",
+      "description": "hand a local file to the kurou crow, get back an attachment ref - bytes skip koma's context (and her token budget)",
+      "version": "0.1.0",
+      "author": {
+        "name": "Chroma"
+      },
+      "category": "productivity"
+    }
+  ]
+}
