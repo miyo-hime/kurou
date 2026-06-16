@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod discord;
 mod gateway;
+mod ledger;
 mod mentions;
 mod oauth;
 mod server;

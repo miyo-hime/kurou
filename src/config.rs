@@ -70,12 +70,11 @@ pub struct Config {
     #[arg(long = "gateway-mode", env = "GATEWAY_MODE", default_value = "off")]
     pub gateway_mode: GatewayMode,
 
-    #[arg(
-        long = "mention-db-path",
-        env = "MENTION_DB_PATH",
-        default_value = "mentions.sqlite3"
-    )]
-    pub mention_db_path: PathBuf,
+    // the crow's whole book lives in one sqlite file - mentions now, watch layout next,
+    // phase-5 mod entries later. LEDGER_PATH is the name going forward; MENTION_DB_PATH
+    // still works so a live unit doesn't orphan its db on upgrade. resolve via ledger_path().
+    #[arg(long = "ledger-path", env = "LEDGER_PATH")]
+    pub ledger_path: Option<PathBuf>,
 
     #[arg(
         long = "mention-keyword",
@@ -84,4 +83,13 @@ pub struct Config {
         default_value = "koma"
     )]
     pub mention_keywords: Vec<String>,
+}
+
+impl Config {
+    pub fn ledger_path(&self) -> PathBuf {
+        self.ledger_path
+            .clone()
+            .or_else(|| std::env::var_os("MENTION_DB_PATH").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("mentions.sqlite3"))
+    }
 }

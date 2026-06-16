@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use serde::Serialize;
 
 #[derive(Clone, Debug)]
@@ -44,13 +44,6 @@ impl MentionStore {
         Self { path }
     }
 
-    pub async fn initialize(&self) -> Result<()> {
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || initialize_blocking(&path))
-            .await
-            .context("mention store task panicked")?
-    }
-
     pub async fn insert(&self, mention: NewMention) -> Result<bool> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || insert_blocking(&path, mention))
@@ -73,50 +66,28 @@ impl MentionStore {
     }
 }
 
-fn connect(path: &Path) -> Result<Connection> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
+pub(crate) const SCHEMA: &str = r#"
+    create table if not exists mentions (
+        id integer primary key autoincrement,
+        message_id text not null unique,
+        guild_id text,
+        channel_id text not null,
+        author_id text not null,
+        author_name text not null,
+        author_display_name text,
+        content text not null,
+        matched text not null,
+        timestamp text not null,
+        link text not null,
+        seen integer not null default 0,
+        created_at text not null default current_timestamp
+    );
 
-    let connection = Connection::open(path)
-        .with_context(|| format!("failed to open mention db {}", path.display()))?;
-    connection.pragma_update(None, "journal_mode", "WAL")?;
-    connection.pragma_update(None, "foreign_keys", "ON")?;
-    Ok(connection)
-}
-
-fn initialize_blocking(path: &Path) -> Result<()> {
-    let connection = connect(path)?;
-    connection.execute_batch(
-        r#"
-        create table if not exists mentions (
-            id integer primary key autoincrement,
-            message_id text not null unique,
-            guild_id text,
-            channel_id text not null,
-            author_id text not null,
-            author_name text not null,
-            author_display_name text,
-            content text not null,
-            matched text not null,
-            timestamp text not null,
-            link text not null,
-            seen integer not null default 0,
-            created_at text not null default current_timestamp
-        );
-
-        create index if not exists idx_mentions_seen_id on mentions(seen, id);
-        "#,
-    )?;
-    Ok(())
-}
+    create index if not exists idx_mentions_seen_id on mentions(seen, id);
+"#;
 
 fn insert_blocking(path: &Path, mention: NewMention) -> Result<bool> {
-    let connection = connect(path)?;
+    let connection = crate::ledger::connect(path)?;
     let changed = connection.execute(
         r#"
         insert or ignore into mentions (
@@ -149,7 +120,7 @@ fn insert_blocking(path: &Path, mention: NewMention) -> Result<bool> {
 }
 
 fn list_blocking(path: &Path, include_seen: bool, limit: u8) -> Result<Vec<MentionInfo>> {
-    let connection = connect(path)?;
+    let connection = crate::ledger::connect(path)?;
     let where_clause = if include_seen { "1 = 1" } else { "seen = 0" };
     let query = format!(
         r#"
@@ -195,7 +166,7 @@ fn list_blocking(path: &Path, include_seen: bool, limit: u8) -> Result<Vec<Menti
 }
 
 fn mark_seen_blocking(path: &Path, ids: Option<Vec<i64>>) -> Result<usize> {
-    let mut connection = connect(path)?;
+    let mut connection = crate::ledger::connect(path)?;
     match ids {
         Some(ids) => {
             let transaction = connection.transaction()?;

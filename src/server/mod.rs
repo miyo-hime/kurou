@@ -370,11 +370,8 @@ async fn mention_store(config: &Config) -> Result<Option<MentionStore>> {
         return Ok(None);
     }
 
-    let store = MentionStore::new(config.mention_db_path.clone());
-    store.initialize().await?;
-    tracing::info!(
-        path = %config.mention_db_path.display(),
-        "mention inbox initialized"
-    );
-    Ok(Some(store))
+    let path = config.ledger_path();
+    crate::ledger::initialize(path.clone()).await?;
+    tracing::info!(path = %path.display(), "ledger initialized");
+    Ok(Some(MentionStore::new(path)))
 }
