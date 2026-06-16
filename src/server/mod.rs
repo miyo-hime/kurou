@@ -35,7 +35,9 @@ use crate::uploads::UploadStore;
 #[derive(Clone, Debug)]
 pub struct KurouServer {
     pub(crate) client: DiscordClient,
+    pub(crate) readonly_client: Option<DiscordClient>,
     pub(crate) default_guild: Option<GuildId>,
+    pub(crate) readonly_guilds: Vec<GuildId>,
     pub(crate) mention_store: Option<MentionStore>,
     pub(crate) upload_store: UploadStore,
     tool_router: ToolRouter<Self>,
@@ -44,16 +46,43 @@ pub struct KurouServer {
 impl KurouServer {
     pub fn new(
         client: DiscordClient,
+        readonly_client: Option<DiscordClient>,
         default_guild: Option<GuildId>,
+        readonly_guilds: Vec<GuildId>,
         mention_store: Option<MentionStore>,
         upload_store: UploadStore,
     ) -> Self {
         Self {
             client,
+            readonly_client,
             default_guild,
+            readonly_guilds,
             mention_store,
             upload_store,
             tool_router: Self::tool_router(),
+        }
+    }
+
+    // guild is known: primary token for the primary guild, observer for a secondary.
+    pub(crate) fn client_for_guild(&self, guild: GuildId) -> &DiscordClient {
+        match &self.readonly_client {
+            Some(observer) if Some(guild) != self.default_guild => observer,
+            _ => &self.client,
+        }
+    }
+
+    // only a channel id in hand. with no observer it's always primary; otherwise probe
+    // once - the primary bot sees its own guild's channels and 403s on the secondaries.
+    pub(crate) async fn client_for_channel(
+        &self,
+        channel: serenity::model::id::ChannelId,
+    ) -> &DiscordClient {
+        let Some(observer) = &self.readonly_client else {
+            return &self.client;
+        };
+        match self.client.channel_guild(channel).await {
+            Ok(guild) if guild == self.default_guild => &self.client,
+            _ => observer,
         }
     }
 
@@ -62,6 +91,7 @@ impl KurouServer {
             + tools::info::router()
             + tools::channels::router()
             + tools::messages::router()
+            + tools::scan::router()
             + tools::mentions::router()
             + tools::send::router()
             + tools::users::router()
@@ -71,8 +101,8 @@ impl KurouServer {
 #[tool_handler(
     router = self.tool_router,
     name = "kurou",
-    version = "0.5.0",
-    instructions = "a small window into a discord server. crow on the wire. get_server_info, list_channels, read_messages, check_mentions, mark_mentions_seen, send_message, get_user_id_by_name."
+    version = "0.6.0",
+    instructions = "a small window into a discord server. crow on the wire. reads: list_servers, get_server_info, list_channels, list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). voice: send_message, get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. read-only secondary guilds ride a separate observer bot, routed for you."
 )]
 impl ServerHandler for KurouServer {}
 
@@ -92,6 +122,8 @@ pub async fn run_stdio(config: Config) -> Result<()> {
         .as_deref()
         .map(parse_guild_id)
         .transpose()?;
+    let readonly_guilds = read_guild_allowlist(&config, default_guild)?;
+    let readonly_client = build_readonly_client(&config, &readonly_guilds)?;
 
     let mention_store = mention_store(&config).await?;
     let gateway = crate::gateway::spawn_gateway(
@@ -106,9 +138,16 @@ pub async fn run_stdio(config: Config) -> Result<()> {
 
     let client = DiscordClient::new(&token);
     let upload_store = UploadStore::new(UPLOAD_TTL);
-    let service = KurouServer::new(client, default_guild, mention_store, upload_store)
-        .serve(stdio())
-        .await?;
+    let service = KurouServer::new(
+        client,
+        readonly_client,
+        default_guild,
+        readonly_guilds,
+        mention_store,
+        upload_store,
+    )
+    .serve(stdio())
+    .await?;
     tracing::info!("kurou running on stdio");
     service.waiting().await?;
     if let Some(gateway) = gateway {
@@ -129,6 +168,8 @@ pub async fn run_http(config: Config) -> Result<()> {
         .as_deref()
         .map(parse_guild_id)
         .transpose()?;
+    let readonly_guilds = read_guild_allowlist(&config, default_guild)?;
+    let readonly_client = build_readonly_client(&config, &readonly_guilds)?;
     let bind_addr: std::net::SocketAddr = (config.host, config.port).into();
     let mention_store = mention_store(&config).await?;
     let gateway = crate::gateway::spawn_gateway(
@@ -154,12 +195,16 @@ pub async fn run_http(config: Config) -> Result<()> {
         .with_allowed_origins(allowed_origins.clone())
         .with_cancellation_token(cancellation.child_token());
     let factory_store = upload_store.clone();
+    let factory_readonly = readonly_guilds.clone();
+    let factory_readonly_client = readonly_client.clone();
     let service: StreamableHttpService<KurouServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
                 Ok(KurouServer::new(
                     DiscordClient::new(&token),
+                    factory_readonly_client.clone(),
                     default_guild,
+                    factory_readonly.clone(),
                     mention_store.clone(),
                     factory_store.clone(),
                 ))
@@ -269,6 +314,39 @@ fn parse_guild_id(raw: &str) -> Result<GuildId> {
         .parse::<u64>()
         .with_context(|| format!("DISCORD_GUILD_ID '{raw}' is not a valid snowflake"))?;
     Ok(GuildId::new(id))
+}
+
+fn read_guild_allowlist(config: &Config, default_guild: Option<GuildId>) -> Result<Vec<GuildId>> {
+    let guilds = config
+        .readonly_guilds
+        .iter()
+        .filter(|raw| !raw.trim().is_empty())
+        .map(|raw| {
+            raw.trim()
+                .parse::<u64>()
+                .map(GuildId::new)
+                .with_context(|| format!("READONLY_GUILDS '{raw}' is not a valid snowflake"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !guilds.is_empty() && default_guild.is_none() {
+        anyhow::bail!("READONLY_GUILDS is set but DISCORD_GUILD_ID (the primary, the only place send_message may post) is not");
+    }
+    Ok(guilds)
+}
+
+fn build_readonly_client(config: &Config, readonly_guilds: &[GuildId]) -> Result<Option<DiscordClient>> {
+    let token = config
+        .readonly_discord_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    match (readonly_guilds.is_empty(), token) {
+        (true, _) => Ok(None),
+        (false, Some(token)) => Ok(Some(DiscordClient::new(token))),
+        (false, None) => {
+            anyhow::bail!("READONLY_GUILDS is set but READONLY_DISCORD_TOKEN (the observer bot) is not")
+        }
+    }
 }
 
 fn allowed_hosts(config: &Config) -> Vec<String> {

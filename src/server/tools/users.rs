@@ -37,7 +37,7 @@ impl KurouServer {
             limit,
         }): Parameters<GetUserIdByNameRequest>,
     ) -> Result<String, String> {
-        let guild = resolve_guild(guild_id, self.default_guild)?;
+        let guild = resolve_guild(guild_id, self.default_guild, &self.readonly_guilds)?;
         let query = name.trim();
         if query.is_empty() {
             return Err("name cannot be empty".to_string());
@@ -45,7 +45,7 @@ impl KurouServer {
 
         let limit = limit.unwrap_or(10).clamp(1, 100);
         let members = self
-            .client
+            .client_for_guild(guild)
             .search_members(guild, query, limit)
             .await
             .map_err(tool_error)?;

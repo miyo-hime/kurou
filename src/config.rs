@@ -28,6 +28,16 @@ pub struct Config {
     #[arg(long, env = "DISCORD_GUILD_ID")]
     pub discord_guild_id: Option<String>,
 
+    // servers the crow may read but never speak in. when set, DISCORD_GUILD_ID is the
+    // one place send_message is allowed to land.
+    #[arg(long = "readonly-guild", env = "READONLY_GUILDS", value_delimiter = ',')]
+    pub readonly_guilds: Vec<String>,
+
+    // a separate observer bot for the read-only guilds. a different application than the
+    // primary, so it can't post as koma there even if we fat-fingered it.
+    #[arg(long = "readonly-token", env = "READONLY_DISCORD_TOKEN")]
+    pub readonly_discord_token: Option<String>,
+
     #[arg(long, env = "PORT", default_value_t = 3000)]
     pub port: u16,
 

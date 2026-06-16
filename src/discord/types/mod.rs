@@ -87,6 +87,10 @@ pub fn messages_block(messages: &[Message]) -> String {
             let _ = writeln!(output, "edited: {edited}");
         }
 
+        if let Some(reply) = format_reply(message) {
+            let _ = writeln!(output, "{reply}");
+        }
+
         if !message.reactions.is_empty() {
             let reactions = message
                 .reactions
@@ -140,6 +144,23 @@ pub fn messages_block(messages: &[Message]) -> String {
     }
 
     output
+}
+
+fn format_reply(message: &Message) -> Option<String> {
+    match message.referenced_message.as_deref() {
+        Some(parent) => {
+            let snippet = short_inline(&parent.content);
+            Some(format!(
+                "reply-to: [id={}, author_name={}] {}",
+                parent.id,
+                quote_header(&parent.author.name),
+                snippet
+            ))
+        }
+        // reference set but no parent payload = the message it replied to is gone
+        None if message.message_reference.is_some() => Some("reply-to: <unavailable>".to_string()),
+        None => None,
+    }
 }
 
 fn quote_header(value: &str) -> String {

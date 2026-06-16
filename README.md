@@ -1,6 +1,6 @@
 # kurou 烏
 
-![version](https://img.shields.io/badge/v0.5.0-orange)
+![version](https://img.shields.io/badge/v0.6.0-orange)
 ![built with rust](https://img.shields.io/badge/Rust-CE412B?logo=rust&logoColor=white)
 ![mcp](https://img.shields.io/badge/MCP-rmcp-purple)
 
@@ -8,11 +8,11 @@
 > dim window into one discord server.
 
 a tiny rust MCP server that lets an assistant peek at a discord server and, when it
-has something to say, say it. seven tools, no more. by default it talks to discord
-over the REST api only - **no gateway, no websocket** - so it can read, it can post,
-but it can never be pinged, mentioned, or summoned by anyone in the server. if you
-opt into gateway mode, it can appear online and collect a tiny mention inbox without
-ever auto-replying.
+has something to say, say it. a small, focused tool surface and nothing more. by
+default it talks to discord over the REST api only - **no gateway, no websocket** - so
+it can read, it can post, but it can never be pinged, mentioned, or summoned by anyone
+in the server. if you opt into gateway mode, it can appear online and collect a tiny
+mention inbox without ever auto-replying.
 
 this is a personal tool. it started as a ~5-tool rewrite of the ~50-tool
 [SaseQ/discord-mcp](https://github.com/SaseQ/discord-mcp) (java/spring/JDA), trimmed
@@ -23,8 +23,10 @@ own risk.
 ## what you get
 
 - streamable MCP over **stdio** (local) or **HTTP** (hosted)
-- seven tools: read server info, list channels, read messages, check mentions, mark mentions seen, send a message, find a user id
-- compact message blocks built for an LLM to read, author ids inline
+- a focused read-window: list servers/channels/threads, read messages (anchored), fetch one message, read pins, deep-sweep a channel by author/mention/text, plus check/mark a mention inbox
+- voice when it has something to say: send a message, find a user id
+- optional read-only **secondary servers** on a separate observer bot - watch more, post in none
+- compact message blocks built for an LLM to read, author ids inline, reply context inline
 - bearer auth + a tiny PKCE OAuth shim for hosted HTTP
 - structurally un-summonable by default: REST only, the gateway is never opened unless you ask for it
 - optional gateway presence/mention mode for online status and a pull-based mention inbox
@@ -81,9 +83,14 @@ precision and nobody wants that bug.
 
 | tool | mutates? | what it does |
 |---|---:|---|
+| `list_servers` | no | the guilds the crow can read, each tagged `primary` (writable) or `readonly` (watch-only, separate bot) |
 | `get_server_info` | no | guild name, id, member count, description |
 | `list_channels` | no | every channel with id, name, kind (Text/Voice/Category/Forum/...), and topic |
-| `read_messages` | no | recent messages from a channel as compact blocks, newest first, author ids inline; reactions/attachments/stickers/embeds when present. `limit` clamps 1-100 (default 50) |
+| `list_threads` | no | the active (non-archived) threads in a guild; a thread id works anywhere a channel id does |
+| `read_messages` | no | messages from a channel or thread as compact blocks, newest first; reactions/attachments/stickers/embeds/reply-context when present. anchor with `around`/`before`/`after` a message id to read a specific slice. `limit` clamps 1-100 (default 50) |
+| `get_message` | no | one message by id, same compact block |
+| `get_pinned` | no | a channel's pinned messages (discord's own pins endpoint) |
+| `scan_channel` | no | deep-sweep a channel by paging backward, filtering by author / mention / text (case-insensitive). bounded by `max_pages`; reports `reached_cap` + `oldest_scanned_id` so you can continue. our own search, since discord's is closed to bots |
 | `check_mentions` | no | reads the collected mention inbox when `GATEWAY_MODE=mentions`. `limit` clamps 1-100 (default 20) |
 | `mark_mentions_seen` | yes-ish | marks mention inbox rows as seen. pass `ids`, or omit them to mark all unseen rows |
 | `send_message` | **yes** | posts to a channel. up to discord's 2000 chars, plus optional file attachments. this changes the server |
@@ -92,7 +99,31 @@ precision and nobody wants that bug.
 `list_channels` returns *all* channels, not just text ones - a read window is more
 useful seeing the whole layout, and the `kind` field tells you what each one is.
 `get_user_id_by_name` is prefix search (that's what discord's REST endpoint gives
-you), so it's good for finding people, not for fuzzy magic.
+you), so it's good for finding people, not for fuzzy magic. `scan_channel` is the one
+heavy read - it makes several API calls, so it's a separate tool rather than a flag,
+and the page cap keeps it honest.
+
+## read-only secondary servers
+
+the crow can watch more than one server. the primary (`DISCORD_GUILD_ID`) is the only
+place it's ever allowed to speak; any guilds you list in `READONLY_GUILDS` are
+watch-only. those secondaries ride a **separate observer bot** (`READONLY_DISCORD_TOKEN`)
+- a different discord application, so it structurally *cannot* post as your primary bot
+there. read-only stops being a code check and becomes a discord-level fact.
+
+```env
+DISCORD_TOKEN=primary_bot_token
+DISCORD_GUILD_ID=primary_guild_id
+READONLY_GUILDS=other_guild_a,other_guild_b
+READONLY_DISCORD_TOKEN=observer_bot_token
+```
+
+routing is automatic: tools that take a `guild_id` pick the right bot from the guild,
+and channel-scoped reads (`read_messages`, `get_message`, `get_pinned`, `scan_channel`)
+resolve the bot from the channel for you. `send_message` resolves the target channel's
+guild and refuses anything that isn't the primary. when `READONLY_GUILDS` is empty none
+of this is active and there's no overhead. call `list_servers` to see which guild is
+which.
 
 ## attachments
 
@@ -229,7 +260,9 @@ TRANSPORT=http
 | env var | cli flag | default | notes |
 |---|---|---|---|
 | `DISCORD_TOKEN` | `--discord-token` | none | required; the bot token |
-| `DISCORD_GUILD_ID` | `--discord-guild-id` | none | default guild for tools that take `guild_id` |
+| `DISCORD_GUILD_ID` | `--discord-guild-id` | none | default + primary guild; the only place `send_message` may post |
+| `READONLY_GUILDS` | `--readonly-guild` | empty | comma-separated guild ids the crow may read but never post in |
+| `READONLY_DISCORD_TOKEN` | `--readonly-token` | none | observer bot token for the read-only guilds; required when `READONLY_GUILDS` is set |
 | `TRANSPORT` | `--transport` | `stdio` | `stdio` or `http` |
 | `HOST` | `--host` | `127.0.0.1` | use `0.0.0.0` for hosted http |
 | `PORT` | `--port` | `3000` | http listen port |

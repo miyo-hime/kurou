@@ -64,6 +64,7 @@ impl KurouServer {
         }): Parameters<SendMessageRequest>,
     ) -> Result<String, String> {
         let channel = parse_channel(&channel_id)?;
+        self.guard_send_target(channel).await?;
         let attachments =
             self.resolve_attachments(attachment_urls, attachment_refs, attachments_inline)?;
         validate_content(&content, attachments.len())?;
@@ -78,6 +79,24 @@ impl KurouServer {
 }
 
 impl KurouServer {
+    // the mouth's gate: when read-only secondaries exist, send_message may only land in
+    // the primary guild. resolve the channel's guild and refuse anything else.
+    async fn guard_send_target(&self, channel: serenity::model::id::ChannelId) -> Result<(), String> {
+        if self.readonly_guilds.is_empty() {
+            return Ok(());
+        }
+        let primary = self
+            .default_guild
+            .ok_or_else(|| "READONLY_GUILDS is set but DISCORD_GUILD_ID (primary) is not".to_string())?;
+        let guild = self.client.channel_guild(channel).await.map_err(tool_error)?;
+        if guild != Some(primary) {
+            return Err(format!(
+                "refusing to send: channel {channel} is not in the primary guild ({primary}); secondaries are read-only"
+            ));
+        }
+        Ok(())
+    }
+
     fn resolve_attachments(
         &self,
         urls: Option<Vec<String>>,

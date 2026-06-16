@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serenity::builder::{CreateAttachment, CreateMessage};
-use serenity::http::Http;
+use serenity::http::{Http, MessagePagination};
 use serenity::model::channel::{GuildChannel, Message};
 use serenity::model::guild::Member;
 use serenity::model::guild::PartialGuild;
-use serenity::model::id::{ChannelId, GuildId};
+use serenity::model::id::{ChannelId, GuildId, MessageId};
 
 pub enum AttachmentSource {
     Url(String),
@@ -33,11 +33,38 @@ impl DiscordClient {
         Ok(self.http.get_channels(guild_id).await?)
     }
 
-    pub async fn messages(&self, channel_id: ChannelId, limit: u8) -> Result<Vec<Message>> {
+    pub async fn messages(
+        &self,
+        channel_id: ChannelId,
+        anchor: Option<MessagePagination>,
+        limit: u8,
+    ) -> Result<Vec<Message>> {
         Ok(self
             .http
-            .get_messages(channel_id, None, Some(limit))
+            .get_messages(channel_id, anchor, Some(limit))
             .await?)
+    }
+
+    pub async fn message(&self, channel_id: ChannelId, message_id: MessageId) -> Result<Message> {
+        Ok(self.http.get_message(channel_id, message_id).await?)
+    }
+
+    pub async fn pins(&self, channel_id: ChannelId) -> Result<Vec<Message>> {
+        Ok(self.http.get_pins(channel_id).await?)
+    }
+
+    pub async fn active_threads(&self, guild_id: GuildId) -> Result<Vec<GuildChannel>> {
+        Ok(self.http.get_guild_active_threads(guild_id).await?.threads)
+    }
+
+    // the hard gate's eyes: which guild does this channel live in? none = dm/group.
+    pub async fn channel_guild(&self, channel_id: ChannelId) -> Result<Option<GuildId>> {
+        Ok(self
+            .http
+            .get_channel(channel_id)
+            .await?
+            .guild()
+            .map(|c| c.guild_id))
     }
 
     pub async fn send_message(
