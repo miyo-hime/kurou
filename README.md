@@ -1,6 +1,6 @@
 # kurou 烏
 
-![version](https://img.shields.io/badge/v0.6.0-orange)
+![version](https://img.shields.io/badge/v0.6.1-orange)
 ![built with rust](https://img.shields.io/badge/Rust-CE412B?logo=rust&logoColor=white)
 ![mcp](https://img.shields.io/badge/MCP-rmcp-purple)
 

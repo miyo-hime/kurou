@@ -72,6 +72,9 @@ impl KurouServer {
             .messages(channel, anchor, limit)
             .await
             .map_err(tool_error)?;
+        if messages.is_empty() {
+            return Ok("(no messages)".to_string());
+        }
         Ok(messages_block(&messages))
     }
 
@@ -112,6 +115,9 @@ impl KurouServer {
             .pins(channel)
             .await
             .map_err(tool_error)?;
+        if messages.is_empty() {
+            return Ok("(no pinned messages)".to_string());
+        }
         Ok(messages_block(&messages))
     }
 }

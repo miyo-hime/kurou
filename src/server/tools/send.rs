@@ -88,13 +88,14 @@ impl KurouServer {
         let primary = self
             .default_guild
             .ok_or_else(|| "READONLY_GUILDS is set but DISCORD_GUILD_ID (primary) is not".to_string())?;
-        let guild = self.client.channel_guild(channel).await.map_err(tool_error)?;
-        if guild != Some(primary) {
-            return Err(format!(
+        // fail-closed: a probe failure means the primary bot can't even see the channel
+        // (it's in a secondary), so treat "can't verify" as "not primary" and refuse.
+        match self.client.channel_guild(channel).await {
+            Ok(Some(guild)) if guild == primary => Ok(()),
+            _ => Err(format!(
                 "refusing to send: channel {channel} is not in the primary guild ({primary}); secondaries are read-only"
-            ));
+            )),
         }
-        Ok(())
     }
 
     fn resolve_attachments(

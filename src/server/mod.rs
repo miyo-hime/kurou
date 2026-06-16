@@ -101,7 +101,7 @@ impl KurouServer {
 #[tool_handler(
     router = self.tool_router,
     name = "kurou",
-    version = "0.6.0",
+    version = "0.6.1",
     instructions = "a small window into a discord server. crow on the wire. reads: list_servers, get_server_info, list_channels, list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). voice: send_message, get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. read-only secondary guilds ride a separate observer bot, routed for you."
 )]
 impl ServerHandler for KurouServer {}
