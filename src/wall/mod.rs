@@ -25,6 +25,8 @@ use crate::layout::LayoutStore;
 use crate::wall::event::{EnrichCache, WallMessage, enrich};
 
 const PAGE: &str = include_str!("nightwatch.html");
+// baked in like the page. the look mother locked rides in the binary, not a sidecar file.
+const BACKDROP: &[u8] = include_bytes!("background.gif");
 
 const BACKFILL_DEFAULT: u8 = 30;
 const BACKFILL_MAX: u8 = 100;
@@ -78,6 +80,7 @@ pub struct WallState {
 pub fn router(state: WallState) -> Router {
     Router::new()
         .route("/wall", get(page))
+        .route("/wall/bg", get(backdrop))
         .route("/wall/events", get(events))
         .route("/wall/backfill", get(backfill))
         .route("/wall/sources", get(sources))
@@ -87,6 +90,17 @@ pub fn router(state: WallState) -> Router {
 
 async fn page() -> Response {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], PAGE).into_response()
+}
+
+async fn backdrop() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/gif"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        BACKDROP,
+    )
+        .into_response()
 }
 
 // the firehose. every message the gateways see lands here; the browser keeps only the

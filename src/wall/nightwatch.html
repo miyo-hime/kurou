@@ -21,6 +21,8 @@
   --rowh:      30px;
   --gap:       14px;
   --cols:      8;
+  --bg-opacity: 0.62;
+  --bg-blur:    4px;
   font-synthesis: none;
 }
 
@@ -38,10 +40,12 @@ body {
   position: relative;
 }
 
-/* no external asset - a moonlit base out of a gradient. swap for a real backdrop later. */
+/* served from the binary at /wall/bg. --bg-opacity / --bg-blur are the knobs. */
 .backdrop {
   position: fixed; inset: -5%;
-  background: radial-gradient(1200px 820px at 22% -8%, #0e131d, #08090d 70%);
+  background: url("/wall/bg") center / cover no-repeat, radial-gradient(1200px 820px at 22% -8%, #0e131d, #08090d 70%);
+  filter: blur(var(--bg-blur)) saturate(108%);
+  opacity: var(--bg-opacity);
   z-index: -2;
 }
 .tint {
