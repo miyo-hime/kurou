@@ -4,9 +4,9 @@ use anyhow::Result;
 use serenity::builder::{CreateAttachment, CreateMessage};
 use serenity::http::{Http, MessagePagination};
 use serenity::model::channel::{GuildChannel, Message};
-use serenity::model::guild::Member;
+use serenity::model::guild::{Member, Role};
 use serenity::model::guild::PartialGuild;
-use serenity::model::id::{ChannelId, GuildId, MessageId};
+use serenity::model::id::{ChannelId, GuildId, MessageId, UserId};
 
 pub enum AttachmentSource {
     Url(String),
@@ -55,6 +55,14 @@ impl DiscordClient {
 
     pub async fn active_threads(&self, guild_id: GuildId) -> Result<Vec<GuildChannel>> {
         Ok(self.http.get_guild_active_threads(guild_id).await?.threads)
+    }
+
+    pub async fn guild_roles(&self, guild_id: GuildId) -> Result<Vec<Role>> {
+        Ok(self.http.get_guild_roles(guild_id).await?)
+    }
+
+    pub async fn member(&self, guild_id: GuildId, user_id: UserId) -> Result<Member> {
+        Ok(self.http.get_member(guild_id, user_id).await?)
     }
 
     // the hard gate's eyes: which guild does this channel live in? none = dm/group.

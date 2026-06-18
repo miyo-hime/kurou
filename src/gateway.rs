@@ -9,17 +9,19 @@ use tokio::task::JoinHandle;
 
 use crate::config::GatewayMode;
 use crate::mentions::{MentionStore, NewMention};
+use crate::wall::event::{WallFanout, enrich};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct GatewayConfig {
     pub mode: GatewayMode,
     pub default_guild: Option<GuildId>,
     pub mention_keywords: Vec<String>,
     pub mention_store: Option<MentionStore>,
+    pub fanout: Option<WallFanout>,
 }
 
 pub fn spawn_gateway(token: String, config: GatewayConfig) -> Option<JoinHandle<()>> {
-    if config.mode == GatewayMode::Off {
+    if config.mode == GatewayMode::Off && config.fanout.is_none() {
         return None;
     }
 
@@ -36,7 +38,7 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         .await
         .context("failed to fetch current bot user before gateway start")?
         .id;
-    let intents = match config.mode {
+    let mut intents = match config.mode {
         GatewayMode::Off => GatewayIntents::empty(),
         GatewayMode::Presence => GatewayIntents::GUILDS,
         GatewayMode::Mentions => {
@@ -45,6 +47,13 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
                 | GatewayIntents::MESSAGE_CONTENT
         }
     };
+    // the wall needs to hear every message, so it forces the message intents on even
+    // when mention-recording is off (the observer gateway watches but never records).
+    if config.fanout.is_some() {
+        intents |= GatewayIntents::GUILDS
+            | GatewayIntents::GUILD_MESSAGES
+            | GatewayIntents::MESSAGE_CONTENT;
+    }
 
     let handler = Handler {
         mode: config.mode,
@@ -52,6 +61,7 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         default_guild: config.default_guild,
         mention_keywords: normalize_keywords(config.mention_keywords),
         mention_store: config.mention_store,
+        fanout: config.fanout,
     };
     let mut client = Client::builder(token, intents)
         .event_handler(handler)
@@ -65,13 +75,14 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         .context("discord gateway client failed")
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Handler {
     mode: GatewayMode,
     bot_user_id: UserId,
     default_guild: Option<GuildId>,
     mention_keywords: Vec<String>,
     mention_store: Option<MentionStore>,
+    fanout: Option<WallFanout>,
 }
 
 #[async_trait]
@@ -87,6 +98,13 @@ impl EventHandler for Handler {
     }
 
     async fn message(&self, _ctx: Context, message: Message) {
+        // the wall wants everything, koma's own posts included. it never acts on a
+        // message, so there's no echo loop to fear here - just a mirror.
+        if let Some(fanout) = &self.fanout {
+            let enriched = enrich(&fanout.client, &fanout.cache, &message).await;
+            let _ = fanout.tx.send(std::sync::Arc::new(enriched));
+        }
+
         if self.mode != GatewayMode::Mentions {
             return;
         }

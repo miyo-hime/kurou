@@ -70,6 +70,11 @@ pub struct Config {
     #[arg(long = "gateway-mode", env = "GATEWAY_MODE", default_value = "off")]
     pub gateway_mode: GatewayMode,
 
+    // the watch-wall (nightwatch). opt-in: it forces the gateway on with message intents
+    // and, with an observer bot, a second invisible gateway for the secondaries. http only.
+    #[arg(long = "wall", env = "WALL", default_value_t = false, action = clap::ArgAction::Set)]
+    pub wall: bool,
+
     // the crow's whole book lives in one sqlite file - mentions now, watch layout next,
     // phase-5 mod entries later. LEDGER_PATH is the name going forward; MENTION_DB_PATH
     // still works so a live unit doesn't orphan its db on upgrade. resolve via ledger_path().

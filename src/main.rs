@@ -2,11 +2,13 @@ mod auth;
 mod config;
 mod discord;
 mod gateway;
+mod layout;
 mod ledger;
 mod mentions;
 mod oauth;
 mod server;
 mod uploads;
+mod wall;
 
 use anyhow::Result;
 use clap::Parser;

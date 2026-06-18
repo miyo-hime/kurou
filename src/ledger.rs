@@ -29,5 +29,6 @@ pub async fn initialize(path: PathBuf) -> Result<()> {
 fn initialize_blocking(path: &Path) -> Result<()> {
     let connection = connect(path)?;
     connection.execute_batch(crate::mentions::SCHEMA)?;
+    connection.execute_batch(crate::layout::SCHEMA)?;
     Ok(())
 }
