@@ -18,6 +18,9 @@ pub struct GatewayConfig {
     pub mention_keywords: Vec<String>,
     pub mention_store: Option<MentionStore>,
     pub fanout: Option<WallFanout>,
+    // the guilds this gateway owns for the wall. when both bots share a guild they both
+    // see the message, so only its owner broadcasts it - otherwise the wall sees double.
+    pub broadcast_guilds: Vec<GuildId>,
 }
 
 pub fn spawn_gateway(token: String, config: GatewayConfig) -> Option<JoinHandle<()>> {
@@ -62,6 +65,7 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         mention_keywords: normalize_keywords(config.mention_keywords),
         mention_store: config.mention_store,
         fanout: config.fanout,
+        broadcast_guilds: config.broadcast_guilds,
     };
     let mut client = Client::builder(token, intents)
         .event_handler(handler)
@@ -83,6 +87,7 @@ struct Handler {
     mention_keywords: Vec<String>,
     mention_store: Option<MentionStore>,
     fanout: Option<WallFanout>,
+    broadcast_guilds: Vec<GuildId>,
 }
 
 #[async_trait]
@@ -99,8 +104,13 @@ impl EventHandler for Handler {
 
     async fn message(&self, _ctx: Context, message: Message) {
         // the wall wants everything, koma's own posts included. it never acts on a
-        // message, so there's no echo loop to fear here - just a mirror.
-        if let Some(fanout) = &self.fanout {
+        // message, so there's no echo loop to fear here - just a mirror. but only for the
+        // guilds this gateway owns: if both bots are in a guild, the other one carries it.
+        if let Some(fanout) = &self.fanout
+            && message
+                .guild_id
+                .is_some_and(|guild| self.broadcast_guilds.contains(&guild))
+        {
             let enriched = enrich(&fanout.client, &fanout.cache, &message).await;
             let _ = fanout.tx.send(std::sync::Arc::new(enriched));
         }

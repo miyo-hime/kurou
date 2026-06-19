@@ -360,9 +360,17 @@ fn sized_thumb(proxy_url: &str, dims: Option<(u32, u32)>) -> String {
 }
 
 fn sticker(sticker: &StickerItem) -> WallSticker {
+    // serenity points gif stickers at cdn.discordapp.com, but discord only serves the gif
+    // variant from media.discordapp.net - the cdn host 404s it. so build the urls ourselves.
+    // lottie + unknown formats have no still image; they fall back to the name.
     let url = match sticker.format_type {
-        StickerFormatType::Lottie => None,
-        _ => sticker.image_url(),
+        StickerFormatType::Png | StickerFormatType::Apng => {
+            Some(format!("https://cdn.discordapp.com/stickers/{}.png", sticker.id))
+        }
+        StickerFormatType::Gif => {
+            Some(format!("https://media.discordapp.net/stickers/{}.gif", sticker.id))
+        }
+        _ => None,
     };
     WallSticker {
         name: sticker.name.clone(),

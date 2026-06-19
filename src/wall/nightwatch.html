@@ -231,6 +231,13 @@ img.thumb {
   max-width: 100%; max-height: 220px; border-radius: 8px;
   border: 1px solid var(--line-soft); display: block;
 }
+/* multiple images tile into whatever columns the panel width affords */
+.attach-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 4px; margin-top: 2px; }
+.attach-grid a { line-height: 0; }
+img.thumb-cell {
+  width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px;
+  border: 1px solid var(--line-soft); display: block;
+}
 img.sticker { width: 96px; height: 96px; object-fit: contain; align-self: flex-start; margin-top: 2px; }
 
 .p-resize { position: absolute; right: 3px; bottom: 3px; width: 14px; height: 14px; cursor: nwse-resize; opacity: 0; transition: opacity .15s; }
@@ -377,12 +384,22 @@ function renderContent(text, mentions) {
   return nodes.length ? nodes : [text];
 }
 
-function renderAttachment(a) {
-  if (a.kind === "image" && a.thumb) {
-    const img = safeImg(a.thumb, { class: "thumb", loading: "lazy", alt: a.name });
-    if (img) return h("a", { class: "thumb-wrap", href: a.url, target: "_blank", rel: "noreferrer" }, img);
-  }
+function fileChip(a) {
   return h("a", { class: "media", href: a.url, target: "_blank", rel: "noreferrer" }, "📎 " + a.name + " · " + fmtSize(a.size));
+}
+function thumbLink(a, wrapClass, imgClass) {
+  const img = safeImg(a.thumb, { class: imgClass, loading: "lazy", alt: a.name });
+  if (!img) return fileChip(a);
+  return h("a", { class: wrapClass, href: a.url, target: "_blank", rel: "noreferrer" }, img);
+}
+function renderAttachments(atts) {
+  const imgs = atts.filter(a => a.kind === "image" && a.thumb);
+  const rest = atts.filter(a => !(a.kind === "image" && a.thumb));
+  const out = [];
+  if (imgs.length === 1) out.push(thumbLink(imgs[0], "thumb-wrap", "thumb"));
+  else if (imgs.length > 1) out.push(h("div", { class: "attach-grid" }, ...imgs.map(a => thumbLink(a, "", "thumb-cell"))));
+  rest.forEach(a => out.push(fileChip(a)));
+  return out;
 }
 
 function renderSticker(s) {
@@ -415,7 +432,7 @@ function renderMsg(m, prevAuthor) {
     h("span", { class: "time", text: fmtTime(m.timestamp) }),
     m.edited ? h("span", { class: "edited", text: "(edited)" }) : null));
   if (m.content) kids.push(h("div", { class: "text" }, ...renderContent(m.content, m.mentions)));
-  (m.attachments || []).forEach(a => kids.push(renderAttachment(a)));
+  renderAttachments(m.attachments || []).forEach(n => kids.push(n));
   (m.stickers || []).forEach(s => kids.push(renderSticker(s)));
   if (m.reactions && m.reactions.length) kids.push(h("div", { class: "chips" }, ...m.reactions.map(renderReaction)));
   return h("div", { class: "msg" + (cont ? " cont" : ""), "data-author": m.author.id }, ...kids);
@@ -423,6 +440,16 @@ function renderMsg(m, prevAuthor) {
 
 function capBody(body) {
   while (body.children.length > DOM_CAP) body.removeChild(body.firstElementChild);
+}
+
+function atBottom(body) { return body.scrollHeight - body.scrollTop - body.clientHeight < 40; }
+function scrollBottom(body) { body.scrollTop = body.scrollHeight; }
+// images load after their node lands and grow the panel; re-pin to bottom as each one
+// arrives so a fresh image doesn't leave us scrolled short of it.
+function pinImgs(body, root) {
+  root.querySelectorAll("img").forEach(img => {
+    if (!img.complete) img.addEventListener("load", () => scrollBottom(body), { once: true });
+  });
 }
 
 async function backfill(p, body) {
@@ -435,7 +462,7 @@ async function backfill(p, body) {
     let prev = null;
     msgs.forEach(m => { body.append(renderMsg(m, prev)); prev = m.author.id; });
     capBody(body);
-    requestAnimationFrame(() => { body.scrollTop = body.scrollHeight; });
+    requestAnimationFrame(() => { scrollBottom(body); pinImgs(body, body); });
   } catch (_) {}
 }
 
@@ -447,12 +474,14 @@ function appendMessage(m) {
     const body = el.querySelector(".p-body");
     const empty = body.querySelector(".p-empty");
     if (empty) empty.remove();
+    // stick to the bottom only if she's already there; if she scrolled up to read, leave her be
+    const stick = atBottom(body);
     const last = body.lastElementChild;
     const node = renderMsg(m, last ? last.dataset.author : null);
     node.classList.add("fresh");
     body.append(node);
     capBody(body);
-    body.scrollTop = body.scrollHeight;
+    if (stick) { scrollBottom(body); pinImgs(body, node); }
     activity[p.id] = Date.now();
     el.classList.remove("quiet");
     el.classList.add("flash");
