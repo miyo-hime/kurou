@@ -1,0 +1,8 @@
+# the crow speaks LF, whoever checks it out. overrides core.autocrlf=true so windows
+# stops rewriting line endings and git stops warning about it.
+* text=auto eol=lf
+
+# things git must never touch
+*.gif binary
+*.png binary
+*.ico binary
