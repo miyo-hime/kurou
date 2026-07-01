@@ -1,6 +1,6 @@
 [package]
 name = "kurou"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 
 [dependencies]
@@ -9,7 +9,9 @@ axum = { version = "0.8", default-features = false, features = ["form", "http1",
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env"] }
 rmcp = { version = "=1.6.0", features = ["transport-io", "transport-streamable-http-server"] }
-rusqlite = { version = "=0.37.0", features = ["bundled"] }
+# the ledger engine. pure-rust sqlite, async, fts on board. default-features drops mimalloc
+# (a C allocator the crow's trickle-volume workload never needs); "fts" is the one we keep.
+turso = { version = "0.7.0-pre.14", default-features = false, features = ["fts"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

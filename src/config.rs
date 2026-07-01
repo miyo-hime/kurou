@@ -75,6 +75,11 @@ pub struct Config {
     #[arg(long = "wall", env = "WALL", default_value_t = false, action = clap::ArgAction::Set)]
     pub wall: bool,
 
+    // the archive. opt-in: forces the gateway on with message intents and persists every
+    // message the crow hears into the ledger, fts-indexed for search_messages. http only.
+    #[arg(long = "archive", env = "ARCHIVE", default_value_t = false, action = clap::ArgAction::Set)]
+    pub archive: bool,
+
     // the crow's whole book lives in one sqlite file - mentions now, watch layout next,
     // phase-5 mod entries later. LEDGER_PATH is the name going forward; MENTION_DB_PATH
     // still works so a live unit doesn't orphan its db on upgrade. resolve via ledger_path().

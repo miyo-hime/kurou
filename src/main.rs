@@ -1,3 +1,4 @@
+mod archive;
 mod auth;
 mod config;
 mod discord;

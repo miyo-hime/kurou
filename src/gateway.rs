@@ -7,6 +7,7 @@ use serenity::model::id::{GuildId, UserId};
 use serenity::model::user::OnlineStatus;
 use tokio::task::JoinHandle;
 
+use crate::archive::{MessageStore, NewMessage};
 use crate::config::GatewayMode;
 use crate::mentions::{MentionStore, NewMention};
 use crate::wall::event::{WallFanout, enrich};
@@ -17,14 +18,15 @@ pub struct GatewayConfig {
     pub default_guild: Option<GuildId>,
     pub mention_keywords: Vec<String>,
     pub mention_store: Option<MentionStore>,
+    pub archive: Option<MessageStore>,
     pub fanout: Option<WallFanout>,
-    // the guilds this gateway owns for the wall. when both bots share a guild they both
-    // see the message, so only its owner broadcasts it - otherwise the wall sees double.
+    // the guilds this gateway owns for the wall and the archive. when both bots share a
+    // guild they both see the message, so only its owner records it - else we double up.
     pub broadcast_guilds: Vec<GuildId>,
 }
 
 pub fn spawn_gateway(token: String, config: GatewayConfig) -> Option<JoinHandle<()>> {
-    if config.mode == GatewayMode::Off && config.fanout.is_none() {
+    if config.mode == GatewayMode::Off && config.fanout.is_none() && config.archive.is_none() {
         return None;
     }
 
@@ -50,9 +52,9 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
                 | GatewayIntents::MESSAGE_CONTENT
         }
     };
-    // the wall needs to hear every message, so it forces the message intents on even
-    // when mention-recording is off (the observer gateway watches but never records).
-    if config.fanout.is_some() {
+    // the wall and the archive both need to hear every message, so either forces the
+    // message intents on even when mention-recording is off.
+    if config.fanout.is_some() || config.archive.is_some() {
         intents |= GatewayIntents::GUILDS
             | GatewayIntents::GUILD_MESSAGES
             | GatewayIntents::MESSAGE_CONTENT;
@@ -64,6 +66,7 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         default_guild: config.default_guild,
         mention_keywords: normalize_keywords(config.mention_keywords),
         mention_store: config.mention_store,
+        archive: config.archive,
         fanout: config.fanout,
         broadcast_guilds: config.broadcast_guilds,
     };
@@ -86,6 +89,7 @@ struct Handler {
     default_guild: Option<GuildId>,
     mention_keywords: Vec<String>,
     mention_store: Option<MentionStore>,
+    archive: Option<MessageStore>,
     fanout: Option<WallFanout>,
     broadcast_guilds: Vec<GuildId>,
 }
@@ -113,6 +117,27 @@ impl EventHandler for Handler {
         {
             let enriched = enrich(&fanout.client, &fanout.cache, &message).await;
             let _ = fanout.tx.send(std::sync::Arc::new(enriched));
+        }
+
+        // the archive keeps everything the crow owns, koma's own posts included - it's a
+        // record of the room, not a mention filter. dedup rides the same guild-ownership gate.
+        if let Some(archive) = &self.archive
+            && message
+                .guild_id
+                .is_some_and(|guild| self.broadcast_guilds.contains(&guild))
+        {
+            let record = NewMessage {
+                message_id: message.id.to_string(),
+                guild_id: message.guild_id.map(|id| id.to_string()),
+                channel_id: message.channel_id.to_string(),
+                author_id: message.author.id.to_string(),
+                author_name: message.author.name.clone(),
+                content: message.content.clone(),
+                timestamp: message.timestamp.to_string(),
+            };
+            if let Err(error) = archive.insert(record).await {
+                tracing::error!(%error, message_id = %message.id, "failed to archive message");
+            }
         }
 
         if self.mode != GatewayMode::Mentions {

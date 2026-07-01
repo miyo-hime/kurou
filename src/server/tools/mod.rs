@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod channels;
 pub mod common;
 pub mod info;

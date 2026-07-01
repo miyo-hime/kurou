@@ -25,11 +25,12 @@ use rmcp::{
 use serenity::model::id::GuildId;
 use tokio_util::sync::CancellationToken;
 
+use crate::archive::MessageStore;
 use crate::auth::AuthConfig;
 use crate::config::{Config, GatewayMode};
 use crate::discord::DiscordClient;
 use crate::gateway::GatewayConfig;
-use crate::layout::LayoutStore;
+use crate::ledger::Ledger;
 use crate::mentions::MentionStore;
 use crate::uploads::UploadStore;
 use crate::wall::event::{EnrichCache, WallFanout, WallMessage};
@@ -42,6 +43,7 @@ pub struct KurouServer {
     pub(crate) default_guild: Option<GuildId>,
     pub(crate) readonly_guilds: Vec<GuildId>,
     pub(crate) mention_store: Option<MentionStore>,
+    pub(crate) message_store: Option<MessageStore>,
     pub(crate) upload_store: UploadStore,
     tool_router: ToolRouter<Self>,
 }
@@ -53,6 +55,7 @@ impl KurouServer {
         default_guild: Option<GuildId>,
         readonly_guilds: Vec<GuildId>,
         mention_store: Option<MentionStore>,
+        message_store: Option<MessageStore>,
         upload_store: UploadStore,
     ) -> Self {
         Self {
@@ -61,6 +64,7 @@ impl KurouServer {
             default_guild,
             readonly_guilds,
             mention_store,
+            message_store,
             upload_store,
             tool_router: Self::tool_router(),
         }
@@ -96,6 +100,7 @@ impl KurouServer {
             + tools::messages::router()
             + tools::scan::router()
             + tools::mentions::router()
+            + tools::archive::router()
             + tools::send::router()
             + tools::users::router()
     }
@@ -104,8 +109,8 @@ impl KurouServer {
 #[tool_handler(
     router = self.tool_router,
     name = "kurou",
-    version = "0.7.1",
-    instructions = "a small window into a discord server. crow on the wire. reads: list_servers, get_server_info, list_channels, list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). voice: send_message, get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. read-only secondary guilds ride a separate observer bot, routed for you."
+    version = "0.8.0",
+    instructions = "a small window into a discord server. crow on the wire. reads: list_servers, get_server_info, list_channels, list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). archive: search_messages (full-text search the local message archive, needs ARCHIVE=true). voice: send_message, get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. read-only secondary guilds ride a separate observer bot, routed for you."
 )]
 impl ServerHandler for KurouServer {}
 
@@ -128,7 +133,17 @@ pub async fn run_stdio(config: Config) -> Result<()> {
     let readonly_guilds = read_guild_allowlist(&config, default_guild)?;
     let readonly_client = build_readonly_client(&config, &readonly_guilds)?;
 
-    let mention_store = mention_store(&config).await?;
+    // stdio is the local smoke path - only the mention inbox lives here; the wall and the
+    // archive are http-only, so the ledger only opens when mentions are being recorded.
+    let ledger = if config.gateway_mode == GatewayMode::Mentions {
+        let ledger = Ledger::open(&config.ledger_path()).await?;
+        tracing::info!(path = %config.ledger_path().display(), "ledger opened");
+        Some(ledger)
+    } else {
+        None
+    };
+    let mention_store = ledger.as_ref().map(Ledger::mentions);
+
     let gateway = crate::gateway::spawn_gateway(
         token.clone(),
         GatewayConfig {
@@ -136,6 +151,7 @@ pub async fn run_stdio(config: Config) -> Result<()> {
             default_guild,
             mention_keywords: config.mention_keywords.clone(),
             mention_store: mention_store.clone(),
+            archive: None,
             fanout: None,
             broadcast_guilds: Vec::new(),
         },
@@ -149,6 +165,7 @@ pub async fn run_stdio(config: Config) -> Result<()> {
         default_guild,
         readonly_guilds,
         mention_store,
+        None,
         upload_store,
     )
     .serve(stdio())
@@ -176,7 +193,25 @@ pub async fn run_http(config: Config) -> Result<()> {
     let readonly_guilds = read_guild_allowlist(&config, default_guild)?;
     let readonly_client = build_readonly_client(&config, &readonly_guilds)?;
     let bind_addr: std::net::SocketAddr = (config.host, config.port).into();
-    let mention_store = mention_store(&config).await?;
+
+    // one ledger for the whole crow. it opens when any tenant is live: the mention inbox,
+    // the wall's saved layout, or the archive. each store draws off the shared handle.
+    let needs_ledger =
+        config.wall || config.archive || config.gateway_mode == GatewayMode::Mentions;
+    let ledger = if needs_ledger {
+        let ledger = Ledger::open(&config.ledger_path()).await?;
+        tracing::info!(path = %config.ledger_path().display(), "ledger opened");
+        Some(ledger)
+    } else {
+        None
+    };
+    let mention_store = (config.gateway_mode == GatewayMode::Mentions)
+        .then(|| ledger.as_ref().map(Ledger::mentions))
+        .flatten();
+    let archive_store = config
+        .archive
+        .then(|| ledger.as_ref().map(Ledger::archive))
+        .flatten();
 
     // the wall's plumbing: one enrichment cache shared by every gateway and the backfill
     // path, one broadcast both gateways pour into and every browser drinks from.
@@ -197,6 +232,7 @@ pub async fn run_http(config: Config) -> Result<()> {
             default_guild,
             mention_keywords: config.mention_keywords.clone(),
             mention_store: mention_store.clone(),
+            archive: archive_store.clone(),
             fanout: primary_fanout,
             broadcast_guilds: default_guild.into_iter().collect(),
         },
@@ -218,6 +254,7 @@ pub async fn run_http(config: Config) -> Result<()> {
                 default_guild: None,
                 mention_keywords: Vec::new(),
                 mention_store: None,
+                archive: None,
                 fanout: Some(WallFanout {
                     client: observer_client.clone(),
                     cache: enrich_cache.clone(),
@@ -230,7 +267,11 @@ pub async fn run_http(config: Config) -> Result<()> {
     };
 
     let wall_state = if wall_enabled {
-        crate::ledger::initialize(config.ledger_path()).await?;
+        // wall implies needs_ledger, so the handle is always open here.
+        let layout = ledger
+            .as_ref()
+            .context("wall enabled without an open ledger")?
+            .layout();
         Some(WallState {
             tx: wall_tx.clone(),
             cache: enrich_cache.clone(),
@@ -240,7 +281,7 @@ pub async fn run_http(config: Config) -> Result<()> {
                 default_guild,
                 readonly_guilds: readonly_guilds.clone(),
             },
-            layout: LayoutStore::new(config.ledger_path()),
+            layout,
         })
     } else {
         None
@@ -262,6 +303,7 @@ pub async fn run_http(config: Config) -> Result<()> {
     let factory_store = upload_store.clone();
     let factory_readonly = readonly_guilds.clone();
     let factory_readonly_client = readonly_client.clone();
+    let factory_message = archive_store.clone();
     let service: StreamableHttpService<KurouServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
@@ -271,6 +313,7 @@ pub async fn run_http(config: Config) -> Result<()> {
                     default_guild,
                     factory_readonly.clone(),
                     mention_store.clone(),
+                    factory_message.clone(),
                     factory_store.clone(),
                 ))
             },
@@ -437,15 +480,4 @@ fn allowed_hosts(config: &Config) -> Vec<String> {
         host,
         bind_addr,
     ]
-}
-
-async fn mention_store(config: &Config) -> Result<Option<MentionStore>> {
-    if config.gateway_mode != GatewayMode::Mentions {
-        return Ok(None);
-    }
-
-    let path = config.ledger_path();
-    crate::ledger::initialize(path.clone()).await?;
-    tracing::info!(path = %path.display(), "ledger initialized");
-    Ok(Some(MentionStore::new(path)))
 }
