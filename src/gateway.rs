@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 
 use crate::archive::{MessageStore, NewMessage};
 use crate::config::GatewayMode;
+use crate::discord::types::RenderedMessage;
 use crate::mentions::{MentionStore, NewMention};
 use crate::wall::event::{WallFanout, enrich};
 
@@ -127,13 +128,10 @@ impl EventHandler for Handler {
                 .is_some_and(|guild| self.broadcast_guilds.contains(&guild))
         {
             let record = NewMessage {
-                message_id: message.id.to_string(),
+                rendered: RenderedMessage::from(&message),
                 guild_id: message.guild_id.map(|id| id.to_string()),
                 channel_id: message.channel_id.to_string(),
-                author_id: message.author.id.to_string(),
-                author_name: message.author.name.clone(),
-                content: message.content.clone(),
-                timestamp: message.timestamp.to_string(),
+                mention_ids: message.mentions.iter().map(|user| user.id.to_string()).collect(),
             };
             if let Err(error) = archive.insert(record).await {
                 tracing::error!(%error, message_id = %message.id, "failed to archive message");

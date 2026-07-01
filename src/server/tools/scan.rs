@@ -4,16 +4,20 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde::{Deserialize, Serialize};
-use serenity::http::MessagePagination;
 use serenity::model::channel::Message;
+use serenity::model::id::ChannelId;
+use serenity::http::MessagePagination;
 
-use crate::discord::types::messages_block;
+use crate::archive::ScanQuery;
+use crate::discord::types::{messages_block, render_messages};
 use crate::server::KurouServer;
 use crate::server::tools::common::{parse_channel, parse_message, tool_error};
 
 const PAGE_SIZE: u8 = 100;
 const DEFAULT_MAX_PAGES: u8 = 10;
 const MAX_MAX_PAGES: u8 = 50;
+const DEFAULT_ARCHIVE_LIMIT: u16 = 100;
+const MAX_ARCHIVE_LIMIT: u16 = 500;
 
 pub fn router() -> ToolRouter<KurouServer> {
     KurouServer::scan_router()
@@ -29,12 +33,23 @@ pub struct ScanChannelRequest {
     pub mention_ids: Option<Vec<String>>,
     #[schemars(description = "keep only messages whose content contains this text (case-insensitive substring)")]
     pub text: Option<String>,
-    #[schemars(description = "how many pages of 100 to sweep before stopping, 1-50, defaults to 10")]
+    #[schemars(description = "where to read: 'auto' (archive if ARCHIVE is on, else REST), 'archive' (local db only, fast), 'rest' (page Discord, full history). defaults to auto")]
+    pub source: Option<String>,
+    #[schemars(description = "REST only: how many pages of 100 to sweep before stopping, 1-50, defaults to 10")]
     pub max_pages: Option<u8>,
+    #[schemars(description = "archive only: max matches to return, 1-500, defaults to 100")]
+    pub limit: Option<u16>,
     #[schemars(description = "start sweeping older than this message id (default: the latest message). pass an earlier oldest_scanned_id to continue a previous sweep")]
     pub before: Option<String>,
     #[schemars(description = "stop sweeping once messages are older than this message id (lower bound)")]
     pub after: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Source {
+    Auto,
+    Archive,
+    Rest,
 }
 
 struct Filters {
@@ -66,13 +81,70 @@ impl Filters {
 impl KurouServer {
     #[tool(
         name = "scan_channel",
-        description = "Deep-sweep a channel or thread by paging backward through history, filtering by author, mention, and/or text (case-insensitive substring). This is the heavy read - it makes several API calls, bounded by max_pages. Our own search, since Discord's search endpoint is closed to bots. Returns matched message blocks plus a meta line; if reached_cap is true there may be more history behind oldest_scanned_id - continue by passing it as `before`."
+        description = "Deep-sweep a channel or thread for messages by author, mention, and/or text (case-insensitive substring). Discord's search endpoint is closed to bots, so this is ours. With ARCHIVE on, source=auto answers from the local archive instantly (bounded by its coverage floor); source=rest pages Discord for full history (heavy, several API calls bounded by max_pages). Returns matched message blocks plus a meta line."
     )]
     pub async fn scan_channel(
         &self,
         Parameters(req): Parameters<ScanChannelRequest>,
     ) -> Result<String, String> {
         let channel = parse_channel(&req.channel_id)?;
+        let source = parse_source(req.source.as_deref())?;
+        if source == Source::Archive && self.message_store.is_none() {
+            return Err("message archive is disabled; set ARCHIVE=true or use source=rest".to_string());
+        }
+        let use_archive = match source {
+            Source::Archive => true,
+            Source::Rest => false,
+            Source::Auto => self.message_store.is_some(),
+        };
+
+        if use_archive {
+            self.scan_via_archive(channel, req).await
+        } else {
+            self.scan_via_rest(channel, req).await
+        }
+    }
+}
+
+impl KurouServer {
+    async fn scan_via_archive(
+        &self,
+        channel: ChannelId,
+        req: ScanChannelRequest,
+    ) -> Result<String, String> {
+        let store = self
+            .message_store
+            .as_ref()
+            .ok_or_else(|| "message archive is disabled; set ARCHIVE=true".to_string())?;
+
+        let query = ScanQuery {
+            channel_id: channel.get().to_string(),
+            author_ids: canonical_ids(req.author_ids)?,
+            mention_ids: canonical_ids(req.mention_ids)?,
+            text: req.text,
+            before: req.before.as_deref().map(parse_message).transpose()?.map(|m| m.get() as i64),
+            after: req.after.as_deref().map(parse_message).transpose()?.map(|m| m.get() as i64),
+            limit: req.limit.unwrap_or(DEFAULT_ARCHIVE_LIMIT).clamp(1, MAX_ARCHIVE_LIMIT),
+        };
+
+        let scan = store.scan(query).await.map_err(tool_error)?;
+        let floor = scan.floor.map(|id| id.to_string()).unwrap_or_else(|| "none".to_string());
+        let meta = format!(
+            "[scan] source=archive matches={} archive_floor={floor} (older than the floor is only in source=rest)",
+            scan.matches.len()
+        );
+        if scan.matches.is_empty() {
+            Ok(format!("{meta}\n(no matches)"))
+        } else {
+            Ok(format!("{meta}\n\n{}", render_messages(&scan.matches)))
+        }
+    }
+
+    async fn scan_via_rest(
+        &self,
+        channel: ChannelId,
+        req: ScanChannelRequest,
+    ) -> Result<String, String> {
         let filters = Filters {
             authors: parse_id_set(req.author_ids)?,
             mentions: parse_id_set(req.mention_ids)?,
@@ -122,14 +194,23 @@ impl KurouServer {
             }
         }
 
-        Ok(render(scanned, pages, reached_cap, oldest, &matches))
+        Ok(render_rest(scanned, pages, reached_cap, oldest, &matches))
     }
 }
 
-fn render(scanned: usize, pages: u8, reached_cap: bool, oldest: Option<u64>, matches: &[Message]) -> String {
+fn parse_source(raw: Option<&str>) -> Result<Source, String> {
+    match raw.map(str::trim).map(str::to_lowercase).as_deref() {
+        None | Some("") | Some("auto") => Ok(Source::Auto),
+        Some("archive") => Ok(Source::Archive),
+        Some("rest") => Ok(Source::Rest),
+        Some(other) => Err(format!("source must be auto, archive, or rest (got '{other}')")),
+    }
+}
+
+fn render_rest(scanned: usize, pages: u8, reached_cap: bool, oldest: Option<u64>, matches: &[Message]) -> String {
     let oldest = oldest.map(|id| id.to_string()).unwrap_or_else(|| "none".to_string());
     let meta = format!(
-        "[scan] scanned={scanned} pages={pages} reached_cap={reached_cap} oldest_scanned_id={oldest} matches={}",
+        "[scan] source=rest scanned={scanned} pages={pages} reached_cap={reached_cap} oldest_scanned_id={oldest} matches={}",
         matches.len()
     );
     if matches.is_empty() {
@@ -137,6 +218,12 @@ fn render(scanned: usize, pages: u8, reached_cap: bool, oldest: Option<u64>, mat
     } else {
         format!("{meta}\n\n{}", messages_block(matches))
     }
+}
+
+// validate each id is a snowflake and hand back its canonical decimal string (what the
+// archive stored), so a stray space or leading zero can't silently miss.
+fn canonical_ids(ids: Option<Vec<String>>) -> Result<Vec<String>, String> {
+    parse_id_set(ids).map(|set| set.into_iter().map(|id| id.to_string()).collect())
 }
 
 fn parse_id_set(ids: Option<Vec<String>>) -> Result<HashSet<u64>, String> {
