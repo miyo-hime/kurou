@@ -238,15 +238,17 @@ pub async fn run_http(config: Config) -> Result<()> {
         },
     );
 
-    // the secondaries only go live through the observer's own gateway - a separate
-    // invisible socket that watches and broadcasts but records nothing, hears nothing back.
+    // the secondaries only go live through the observer's own gateway - a separate invisible
+    // socket that watches but hears nothing back. it wakes for either the wall (broadcast) or
+    // the archive (persist); the fanout is wall-only, the store is archive-only.
+    let observe_secondaries = wall_enabled || config.archive;
     let observer_token = config
         .readonly_discord_token
         .as_deref()
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string);
-    let observer_gateway = match (wall_enabled, observer_token, &readonly_client) {
+    let observer_gateway = match (observe_secondaries, observer_token, &readonly_client) {
         (true, Some(observer_token), Some(observer_client)) => crate::gateway::spawn_gateway(
             observer_token,
             GatewayConfig {
@@ -254,8 +256,8 @@ pub async fn run_http(config: Config) -> Result<()> {
                 default_guild: None,
                 mention_keywords: Vec::new(),
                 mention_store: None,
-                archive: None,
-                fanout: Some(WallFanout {
+                archive: archive_store.clone(),
+                fanout: wall_enabled.then(|| WallFanout {
                     client: observer_client.clone(),
                     cache: enrich_cache.clone(),
                     tx: wall_tx.clone(),
