@@ -19,7 +19,9 @@ if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGW
 fi
 cargo zigbuild --release --target "$target"
 
-bin="target/$target/release/kurou"
+# ※ respect CARGO_TARGET_DIR - else a warm cache elsewhere builds fresh while this verifies
+# a stale ./target binary and nearly ships it under the new tag. that's happened once already.
+bin="${CARGO_TARGET_DIR:-target}/$target/release/kurou"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 echo
