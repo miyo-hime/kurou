@@ -298,4 +298,26 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    #[tokio::test]
+    async fn archive_insert_survives_reopen() {
+        let path = std::env::temp_dir().join("kurou-reopen-repro.db");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let store = Ledger::open(&path).await.unwrap().archive();
+            store.insert(message(100, "koma", "first boot, fresh db", &[])).await.unwrap();
+            store.insert(message(200, "koma", "still first boot", &[])).await.unwrap();
+        }
+
+        let store = Ledger::open(&path).await.unwrap().archive();
+        if let Err(error) = store.insert(message(300, "koma", "second boot, reopened db", &[])).await {
+            panic!("reopen insert failed: {error:#}");
+        }
+
+        let hits = store.search("reopened", 10).await.unwrap();
+        assert_eq!(hits.len(), 1, "fts should see the post-reopen row");
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

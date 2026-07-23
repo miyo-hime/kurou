@@ -33,7 +33,8 @@ pub fn spawn_gateway(token: String, config: GatewayConfig) -> Option<JoinHandle<
 
     Some(tokio::spawn(async move {
         if let Err(error) = run_gateway(&token, config).await {
-            tracing::error!(%error, "discord gateway stopped");
+            // {:#} or the chain stays hidden - a bare %error cost us four days once
+            tracing::error!(error = format!("{error:#}"), "discord gateway stopped");
         }
     }))
 }
@@ -134,7 +135,7 @@ impl EventHandler for Handler {
                 mention_ids: message.mentions.iter().map(|user| user.id.to_string()).collect(),
             };
             if let Err(error) = archive.insert(record).await {
-                tracing::error!(%error, message_id = %message.id, "failed to archive message");
+                tracing::error!(error = format!("{error:#}"), message_id = %message.id, channel_id = %message.channel_id, "failed to archive message");
             }
         }
 
@@ -181,7 +182,7 @@ impl EventHandler for Handler {
                 "stored mention"
             ),
             Ok(false) => {}
-            Err(error) => tracing::error!(%error, "failed to store mention"),
+            Err(error) => tracing::error!(error = format!("{error:#}"), "failed to store mention"),
         }
     }
 }
