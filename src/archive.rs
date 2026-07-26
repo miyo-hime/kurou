@@ -7,7 +7,7 @@ use crate::discord::types::RenderedMessage;
 use crate::ledger::{int, opt_text, text};
 
 // the crow's long memory. every message it hears lands here once, stored twice over: flat
-// columns for filtering (author, content fts, mentions, snowflake range) and a json payload
+// columns for filtering (author, content, mentions, snowflake range) and a json payload
 // of the RenderedMessage so an archive-served scan renders byte-identical to a REST one.
 #[derive(Clone)]
 pub struct MessageStore {
@@ -58,8 +58,6 @@ pub struct ArchiveScan {
     pub floor: Option<i64>,
 }
 
-// fts index at init so every write going forward is indexed - beta turso's pluggable index
-// captures inserts from the moment it exists, it does not backfill a table that predates it.
 pub(crate) const SCHEMA: &str = r#"
     create table if not exists messages (
         message_id integer primary key,
@@ -74,7 +72,6 @@ pub(crate) const SCHEMA: &str = r#"
         created_at text not null default current_timestamp
     );
 
-    create index if not exists msg_fts on messages using fts (content);
     create index if not exists idx_messages_channel on messages(channel_id, message_id);
 "#;
 
@@ -93,7 +90,7 @@ impl MessageStore {
         // space-bounded so a `like '% id %'` match can't collide 123 with 1234.
         let mention_ids = mention_haystack(&message.mention_ids);
 
-        let conn = self.db.connect().context("archive connect")?;
+        let conn = crate::ledger::connect(&self.db).context("archive connect")?;
         let changed = conn
             .execute(
                 r#"
@@ -120,17 +117,17 @@ impl MessageStore {
     }
 
     pub async fn search(&self, query: &str, limit: u8) -> Result<Vec<MessageHit>> {
-        let conn = self.db.connect().context("archive connect")?;
+        let conn = crate::ledger::connect(&self.db).context("archive connect")?;
         let mut rows = conn
             .query(
                 r#"
                 select message_id, guild_id, channel_id, author_id, author_name, content, timestamp
                 from messages
-                where fts_match(content, ?1)
-                order by fts_score(content, ?1) desc
+                where content like ?1
+                order by message_id desc
                 limit ?2
                 "#,
-                params_from_iter([Value::Text(query.to_owned()), Value::Integer(i64::from(limit))]),
+                params_from_iter([Value::Text(format!("%{query}%")), Value::Integer(i64::from(limit))]),
             )
             .await
             .context("search messages")?;
@@ -151,7 +148,7 @@ impl MessageStore {
     }
 
     pub async fn scan(&self, query: ScanQuery) -> Result<ArchiveScan> {
-        let conn = self.db.connect().context("archive connect")?;
+        let conn = crate::ledger::connect(&self.db).context("archive connect")?;
 
         let mut sql = String::from("select payload from messages where channel_id = ?1");
         let mut params: Vec<Value> = vec![Value::Text(query.channel_id.clone())];
@@ -316,7 +313,7 @@ mod tests {
         }
 
         let hits = store.search("reopened", 10).await.unwrap();
-        assert_eq!(hits.len(), 1, "fts should see the post-reopen row");
+        assert_eq!(hits.len(), 1, "search should see the post-reopen row");
 
         let _ = std::fs::remove_file(&path);
     }

@@ -52,7 +52,7 @@ impl MentionStore {
     }
 
     pub async fn insert(&self, mention: NewMention) -> Result<bool> {
-        let conn = self.db.connect().context("mention connect")?;
+        let conn = crate::ledger::connect(&self.db).context("mention connect")?;
         let changed = conn
             .execute(
                 r#"
@@ -88,7 +88,7 @@ impl MentionStore {
     }
 
     pub async fn list(&self, include_seen: bool, limit: u8) -> Result<Vec<MentionInfo>> {
-        let conn = self.db.connect().context("mention connect")?;
+        let conn = crate::ledger::connect(&self.db).context("mention connect")?;
         let where_clause = if include_seen { "1 = 1" } else { "seen = 0" };
         let query = format!(
             r#"
@@ -128,7 +128,7 @@ impl MentionStore {
     }
 
     pub async fn mark_seen(&self, ids: Option<Vec<i64>>) -> Result<usize> {
-        let conn = self.db.connect().context("mention connect")?;
+        let conn = crate::ledger::connect(&self.db).context("mention connect")?;
         let changed = match ids {
             Some(ids) => {
                 let mut changed = 0;

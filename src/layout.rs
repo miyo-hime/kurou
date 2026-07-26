@@ -31,7 +31,7 @@ impl LayoutStore {
     }
 
     pub async fn get(&self) -> Result<Option<String>> {
-        let conn = self.db.connect().context("layout connect")?;
+        let conn = crate::ledger::connect(&self.db).context("layout connect")?;
         let mut rows = conn
             .query("select data from watch_layout where id = 1", ())
             .await
@@ -43,7 +43,7 @@ impl LayoutStore {
     }
 
     pub async fn put(&self, data: String) -> Result<()> {
-        let conn = self.db.connect().context("layout connect")?;
+        let conn = crate::ledger::connect(&self.db).context("layout connect")?;
         conn.execute(
             r#"
             insert into watch_layout (id, data, updated_at)
