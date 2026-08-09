@@ -76,7 +76,7 @@ pub struct Config {
     pub wall: bool,
 
     // the archive. opt-in: forces the gateway on with message intents and persists every
-    // message the crow hears into the ledger, fts-indexed for search_messages. http only.
+    // message the crow hears into the ledger for search_messages. http only.
     #[arg(long = "archive", env = "ARCHIVE", default_value_t = false, action = clap::ArgAction::Set)]
     pub archive: bool,
 
