@@ -1,20 +1,15 @@
-use anyhow::{Context, Result};
-use turso::params::params_from_iter;
-use turso::{Database, Value};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use crate::ledger::text;
+use anyhow::{Context, Result};
+use rusqlite::OptionalExtension;
+use rusqlite::params;
 
 // the crow never reads the bento, it just keeps it. the browser owns the shape;
 // here it's an opaque json blob in a single row that survives across her devices.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LayoutStore {
-    db: Database,
-}
-
-impl std::fmt::Debug for LayoutStore {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("LayoutStore").finish_non_exhaustive()
-    }
+    path: Arc<PathBuf>,
 }
 
 pub(crate) const SCHEMA: &str = r#"
@@ -26,34 +21,38 @@ pub(crate) const SCHEMA: &str = r#"
 "#;
 
 impl LayoutStore {
-    pub fn new(db: Database) -> Self {
-        Self { db }
+    pub fn new(path: Arc<PathBuf>) -> Self {
+        Self { path }
     }
 
     pub async fn get(&self) -> Result<Option<String>> {
-        let conn = crate::ledger::connect(&self.db).context("layout connect")?;
-        let mut rows = conn
-            .query("select data from watch_layout where id = 1", ())
-            .await
-            .context("read layout")?;
-        match rows.next().await.context("read layout row")? {
-            Some(row) => Ok(Some(text(&row, 0)?)),
-            None => Ok(None),
-        }
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = crate::ledger::connect(&path).context("layout connect")?;
+            conn.query_row("select data from watch_layout where id = 1", [], |row| row.get(0))
+                .optional()
+                .context("read layout")
+        })
+        .await
+        .context("layout get task")?
     }
 
     pub async fn put(&self, data: String) -> Result<()> {
-        let conn = crate::ledger::connect(&self.db).context("layout connect")?;
-        conn.execute(
-            r#"
-            insert into watch_layout (id, data, updated_at)
-            values (1, ?1, current_timestamp)
-            on conflict(id) do update set data = excluded.data, updated_at = current_timestamp
-            "#,
-            params_from_iter([Value::Text(data)]),
-        )
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = crate::ledger::connect(&path).context("layout connect")?;
+            conn.execute(
+                r#"
+                insert into watch_layout (id, data, updated_at)
+                values (1, ?1, current_timestamp)
+                on conflict(id) do update set data = excluded.data, updated_at = current_timestamp
+                "#,
+                params![data],
+            )
+            .context("write layout")?;
+            Ok(())
+        })
         .await
-        .context("write layout")?;
-        Ok(())
+        .context("layout put task")?
     }
 }

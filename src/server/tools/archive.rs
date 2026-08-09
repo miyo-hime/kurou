@@ -12,7 +12,7 @@ pub fn router() -> ToolRouter<KurouServer> {
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema, Serialize)]
 pub struct SearchMessagesRequest {
-    #[schemars(description = "substring matched against archived message content (sql like - % and _ are wildcards)")]
+    #[schemars(description = "words to find in archived message content; every word must match and each matches as a prefix (data finds database)")]
     pub query: String,
     #[schemars(description = "how many hits to return, 1-100, defaults to 20")]
     pub limit: Option<u8>,
@@ -22,7 +22,7 @@ pub struct SearchMessagesRequest {
 impl KurouServer {
     #[tool(
         name = "search_messages",
-        description = "Substring-search the crow's local message archive by content, newest first. Requires ARCHIVE=true."
+        description = "Full-text search the crow's local message archive by content, newest first. Requires ARCHIVE=true."
     )]
     pub async fn search_messages(
         &self,

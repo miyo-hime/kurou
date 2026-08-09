@@ -1,23 +1,19 @@
-use anyhow::{Context, Result};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::{Context, Result, bail};
+use rusqlite::params;
+use rusqlite::types::Value;
 use serde::Serialize;
-use turso::params::params_from_iter;
-use turso::{Database, Value};
 
 use crate::discord::types::RenderedMessage;
-use crate::ledger::{int, opt_text, text};
 
 // the crow's long memory. every message it hears lands here once, stored twice over: flat
 // columns for filtering (author, content, mentions, snowflake range) and a json payload
 // of the RenderedMessage so an archive-served scan renders byte-identical to a REST one.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MessageStore {
-    db: Database,
-}
-
-impl std::fmt::Debug for MessageStore {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("MessageStore").finish_non_exhaustive()
-    }
+    path: Arc<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,11 +69,24 @@ pub(crate) const SCHEMA: &str = r#"
     );
 
     create index if not exists idx_messages_channel on messages(channel_id, message_id);
+
+    create virtual table if not exists msg_fts using fts5(content, content='messages', content_rowid='message_id');
+
+    create trigger if not exists msg_fts_ai after insert on messages begin
+        insert into msg_fts(rowid, content) values (new.message_id, new.content);
+    end;
+    create trigger if not exists msg_fts_ad after delete on messages begin
+        insert into msg_fts(msg_fts, rowid, content) values ('delete', old.message_id, old.content);
+    end;
+    create trigger if not exists msg_fts_au after update on messages begin
+        insert into msg_fts(msg_fts, rowid, content) values ('delete', old.message_id, old.content);
+        insert into msg_fts(rowid, content) values (new.message_id, new.content);
+    end;
 "#;
 
 impl MessageStore {
-    pub fn new(db: Database) -> Self {
-        Self { db }
+    pub fn new(path: Arc<PathBuf>) -> Self {
+        Self { path }
     }
 
     pub async fn insert(&self, message: NewMessage) -> Result<bool> {
@@ -90,131 +99,152 @@ impl MessageStore {
         // space-bounded so a `like '% id %'` match can't collide 123 with 1234.
         let mention_ids = mention_haystack(&message.mention_ids);
 
-        let conn = crate::ledger::connect(&self.db).context("archive connect")?;
-        let changed = conn
-            .execute(
-                r#"
-                insert or ignore into messages (
-                    message_id, guild_id, channel_id, author_id, author_name,
-                    content, mention_ids, timestamp, payload
-                ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                "#,
-                params_from_iter([
-                    Value::Integer(snowflake),
-                    crate::ledger::null_text(message.guild_id),
-                    Value::Text(message.channel_id),
-                    Value::Text(message.rendered.author_id.clone()),
-                    Value::Text(message.rendered.author_name.clone()),
-                    Value::Text(message.rendered.content.clone()),
-                    Value::Text(mention_ids),
-                    Value::Text(message.rendered.timestamp.clone()),
-                    Value::Text(payload),
-                ]),
-            )
-            .await
-            .context("insert message")?;
-        Ok(changed > 0)
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = crate::ledger::connect(&path).context("archive connect")?;
+            let changed = conn
+                .execute(
+                    r#"
+                    insert or ignore into messages (
+                        message_id, guild_id, channel_id, author_id, author_name,
+                        content, mention_ids, timestamp, payload
+                    ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    "#,
+                    params![
+                        snowflake,
+                        message.guild_id,
+                        message.channel_id,
+                        message.rendered.author_id,
+                        message.rendered.author_name,
+                        message.rendered.content,
+                        mention_ids,
+                        message.rendered.timestamp,
+                        payload,
+                    ],
+                )
+                .context("insert message")?;
+            Ok(changed > 0)
+        })
+        .await
+        .context("archive insert task")?
     }
 
     pub async fn search(&self, query: &str, limit: u8) -> Result<Vec<MessageHit>> {
-        let conn = crate::ledger::connect(&self.db).context("archive connect")?;
-        let mut rows = conn
-            .query(
-                r#"
-                select message_id, guild_id, channel_id, author_id, author_name, content, timestamp
-                from messages
-                where content like ?1
-                order by message_id desc
-                limit ?2
-                "#,
-                params_from_iter([Value::Text(format!("%{query}%")), Value::Integer(i64::from(limit))]),
-            )
-            .await
-            .context("search messages")?;
-
-        let mut hits = Vec::new();
-        while let Some(row) = rows.next().await.context("read message row")? {
-            hits.push(MessageHit {
-                message_id: int(&row, 0)?.to_string(),
-                guild_id: opt_text(&row, 1)?,
-                channel_id: text(&row, 2)?,
-                author_id: text(&row, 3)?,
-                author_name: text(&row, 4)?,
-                content: text(&row, 5)?,
-                timestamp: text(&row, 6)?,
-            });
-        }
-        Ok(hits)
+        let match_query = fts_query(query)?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = crate::ledger::connect(&path).context("archive connect")?;
+            let mut stmt = conn
+                .prepare(
+                    r#"
+                    select m.message_id, m.guild_id, m.channel_id, m.author_id, m.author_name, m.content, m.timestamp
+                    from msg_fts join messages m on m.message_id = msg_fts.rowid
+                    where msg_fts match ?1
+                    order by m.message_id desc
+                    limit ?2
+                    "#,
+                )
+                .context("prepare search")?;
+            let hits = stmt
+                .query_map(params![match_query, i64::from(limit)], |row| {
+                    Ok(MessageHit {
+                        message_id: row.get::<_, i64>(0)?.to_string(),
+                        guild_id: row.get(1)?,
+                        channel_id: row.get(2)?,
+                        author_id: row.get(3)?,
+                        author_name: row.get(4)?,
+                        content: row.get(5)?,
+                        timestamp: row.get(6)?,
+                    })
+                })
+                .context("search messages")?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("read message rows")?;
+            Ok(hits)
+        })
+        .await
+        .context("archive search task")?
     }
 
     pub async fn scan(&self, query: ScanQuery) -> Result<ArchiveScan> {
-        let conn = crate::ledger::connect(&self.db).context("archive connect")?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = crate::ledger::connect(&path).context("archive connect")?;
 
-        let mut sql = String::from("select payload from messages where channel_id = ?1");
-        let mut params: Vec<Value> = vec![Value::Text(query.channel_id.clone())];
+            let mut sql = String::from("select payload from messages where channel_id = ?1");
+            let mut params: Vec<Value> = vec![Value::Text(query.channel_id.clone())];
 
-        if let Some(before) = query.before {
-            params.push(Value::Integer(before));
-            sql.push_str(&format!(" and message_id < ?{}", params.len()));
-        }
-        if let Some(after) = query.after {
-            params.push(Value::Integer(after));
-            sql.push_str(&format!(" and message_id > ?{}", params.len()));
-        }
-        if !query.author_ids.is_empty() {
-            let start = params.len() + 1;
-            for id in &query.author_ids {
-                params.push(Value::Text(id.clone()));
+            if let Some(before) = query.before {
+                params.push(Value::Integer(before));
+                sql.push_str(&format!(" and message_id < ?{}", params.len()));
             }
-            let placeholders = (start..start + query.author_ids.len())
-                .map(|index| format!("?{index}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            sql.push_str(&format!(" and author_id in ({placeholders})"));
-        }
-        if !query.mention_ids.is_empty() {
-            // matches messages mentioning ANY of the wanted ids.
-            let mut ors = Vec::new();
-            for id in &query.mention_ids {
-                params.push(Value::Text(format!(" {id} ")));
-                ors.push(format!("mention_ids like '%' || ?{} || '%'", params.len()));
+            if let Some(after) = query.after {
+                params.push(Value::Integer(after));
+                sql.push_str(&format!(" and message_id > ?{}", params.len()));
             }
-            sql.push_str(&format!(" and ({})", ors.join(" or ")));
-        }
-        if let Some(text) = &query.text {
-            params.push(Value::Text(format!("%{text}%")));
-            sql.push_str(&format!(" and content like ?{}", params.len()));
-        }
+            if !query.author_ids.is_empty() {
+                let start = params.len() + 1;
+                for id in &query.author_ids {
+                    params.push(Value::Text(id.clone()));
+                }
+                let placeholders = (start..start + query.author_ids.len())
+                    .map(|index| format!("?{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                sql.push_str(&format!(" and author_id in ({placeholders})"));
+            }
+            if !query.mention_ids.is_empty() {
+                // matches messages mentioning ANY of the wanted ids.
+                let mut ors = Vec::new();
+                for id in &query.mention_ids {
+                    params.push(Value::Text(format!(" {id} ")));
+                    ors.push(format!("mention_ids like '%' || ?{} || '%'", params.len()));
+                }
+                sql.push_str(&format!(" and ({})", ors.join(" or ")));
+            }
+            if let Some(text) = &query.text {
+                params.push(Value::Text(format!("%{text}%")));
+                sql.push_str(&format!(" and content like ?{}", params.len()));
+            }
 
-        params.push(Value::Integer(i64::from(query.limit)));
-        sql.push_str(&format!(" order by message_id desc limit ?{}", params.len()));
+            params.push(Value::Integer(i64::from(query.limit)));
+            sql.push_str(&format!(" order by message_id desc limit ?{}", params.len()));
 
-        let mut rows = conn.query(sql, params_from_iter(params)).await.context("scan messages")?;
-        let mut matches = Vec::new();
-        while let Some(row) = rows.next().await.context("read scan row")? {
-            let payload = text(&row, 0)?;
-            let rendered: RenderedMessage =
-                serde_json::from_str(&payload).context("deserialize payload")?;
-            matches.push(rendered);
-        }
+            let mut stmt = conn.prepare(&sql).context("prepare scan")?;
+            let payloads = stmt
+                .query_map(rusqlite::params_from_iter(params), |row| row.get::<_, String>(0))
+                .context("scan messages")?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("read scan rows")?;
+            let matches = payloads
+                .iter()
+                .map(|payload| serde_json::from_str(payload).context("deserialize payload"))
+                .collect::<Result<Vec<RenderedMessage>>>()?;
 
-        let mut floor_rows = conn
-            .query(
-                "select min(message_id) from messages where channel_id = ?1",
-                params_from_iter([Value::Text(query.channel_id)]),
-            )
-            .await
-            .context("scan floor")?;
-        let floor = match floor_rows.next().await.context("read floor row")? {
-            Some(row) => match row.get_value(0)? {
-                Value::Integer(value) => Some(value),
-                _ => None,
-            },
-            None => None,
-        };
+            let floor = conn
+                .query_row(
+                    "select min(message_id) from messages where channel_id = ?1",
+                    params![query.channel_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .context("scan floor")?;
 
-        Ok(ArchiveScan { matches, floor })
+            Ok(ArchiveScan { matches, floor })
+        })
+        .await
+        .context("archive scan task")?
     }
+}
+
+// fts5 match syntax has operators and bare tokens error on punctuation, so every word
+// becomes a quoted prefix token: `koma database` -> `"koma"* "database"*` (AND semantics).
+fn fts_query(query: &str) -> Result<String> {
+    let tokens: Vec<String> =
+        query.split_whitespace().map(|token| format!("\"{}\"*", token.replace('"', "\"\""))).collect();
+    if tokens.is_empty() {
+        bail!("search query is empty");
+    }
+    Ok(tokens.join(" "))
 }
 
 fn mention_haystack(ids: &[String]) -> String {
@@ -314,6 +344,53 @@ mod tests {
 
         let hits = store.search("reopened", 10).await.unwrap();
         assert_eq!(hits.len(), 1, "search should see the post-reopen row");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn fts_prefix_search_and_backfill() {
+        let path = std::env::temp_dir().join("kurou-fts-search.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Ledger::open(&path).await.unwrap().archive();
+
+        store.insert(message(100, "koma", "the crow keeps a database", &[])).await.unwrap();
+        store.insert(message(200, "kurone", "unrelated chatter", &[])).await.unwrap();
+
+        // prefix token: "data" finds "database"
+        let hits = store.search("data", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, "100");
+
+        // multi-word is AND
+        assert_eq!(store.search("crow database", 10).await.unwrap().len(), 1);
+        assert_eq!(store.search("crow chatter", 10).await.unwrap().len(), 0);
+
+        // fts operators arrive quoted, not parsed
+        assert!(store.search("\"quoted\" AND (weird", 10).await.is_ok());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn backfill_indexes_rows_from_the_turso_era() {
+        let path = std::env::temp_dir().join("kurou-fts-backfill.db");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let store = Ledger::open(&path).await.unwrap().archive();
+            store.insert(message(100, "koma", "written before the index existed", &[])).await.unwrap();
+            // strip the fts table and triggers - this db now looks like one turso left behind
+            let conn = crate::ledger::connect(&path).unwrap();
+            conn.execute_batch(
+                "drop trigger msg_fts_ai; drop trigger msg_fts_ad; drop trigger msg_fts_au; drop table msg_fts;",
+            )
+            .unwrap();
+        }
+
+        let store = Ledger::open(&path).await.unwrap().archive();
+        let hits = store.search("index", 10).await.unwrap();
+        assert_eq!(hits.len(), 1, "pre-fts rows should be searchable after the backfill");
 
         let _ = std::fs::remove_file(&path);
     }

@@ -1,13 +1,14 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
-use turso::{Builder, Database, Row, Value};
+use anyhow::{Context, Result};
+use rusqlite::Connection;
 
 // the one place that knows the whole book. every tenant hands its schema over at open()
-// and then draws a store off the shared database handle - one file, one engine, one owner.
-#[derive(Clone)]
+// and then draws a store off the shared path - one file, one engine, connection per call.
+#[derive(Clone, Debug)]
 pub struct Ledger {
-    db: Database,
+    path: Arc<PathBuf>,
 }
 
 impl Ledger {
@@ -16,65 +17,55 @@ impl Ledger {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        let path_str = path.to_str().context("ledger path is not valid utf-8")?;
+        let path = Arc::new(path.to_owned());
+        let ledger = Self { path };
 
-        let db = Builder::new_local(path_str).build().await.with_context(|| format!("failed to open ledger {path_str}"))?;
+        let opening = ledger.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let conn = connect(&opening.path).context("failed to open ledger")?;
+            // wal is persistent - set once here, every later connection inherits it.
+            conn.pragma_update(None, "journal_mode", "wal").context("set wal mode")?;
+            conn.execute_batch(crate::mentions::SCHEMA).context("mentions schema")?;
+            conn.execute_batch(crate::layout::SCHEMA).context("layout schema")?;
 
-        let conn = connect(&db).context("failed to connect to ledger")?;
-        conn.execute_batch(crate::mentions::SCHEMA).await.context("mentions schema")?;
-        conn.execute_batch(crate::layout::SCHEMA).await.context("layout schema")?;
-        conn.execute_batch(crate::archive::SCHEMA).await.context("archive schema")?;
+            // dbs from the turso era predate msg_fts, so a fresh index backfills from
+            // the existing rows. rebuild on an empty table is free, so first boot is too.
+            let fresh_fts = !table_exists(&conn, "msg_fts").context("check for fts table")?;
+            conn.execute_batch(crate::archive::SCHEMA).context("archive schema")?;
+            if fresh_fts {
+                tracing::info!("building the fts index over the archive");
+                conn.execute("insert into msg_fts(msg_fts) values ('rebuild')", [])
+                    .context("backfill fts index")?;
+            }
+            Ok(())
+        })
+        .await
+        .context("ledger open task")??;
 
-        Ok(Self { db })
+        Ok(ledger)
     }
 
     pub fn mentions(&self) -> crate::mentions::MentionStore {
-        crate::mentions::MentionStore::new(self.db.clone())
+        crate::mentions::MentionStore::new(self.path.clone())
     }
 
     pub fn layout(&self) -> crate::layout::LayoutStore {
-        crate::layout::LayoutStore::new(self.db.clone())
+        crate::layout::LayoutStore::new(self.path.clone())
     }
 
     pub fn archive(&self) -> crate::archive::MessageStore {
-        crate::archive::MessageStore::new(self.db.clone())
+        crate::archive::MessageStore::new(self.path.clone())
     }
 }
 
-// every tenant connects through here: turso's default busy handler fails instantly on
-// lock contention, and that default once cost the archive ~150 messages a day.
-pub(crate) fn connect(db: &Database) -> turso::Result<turso::Connection> {
-    let conn = db.connect()?;
+// every tenant connects through here: without a busy timeout, lock contention fails
+// instantly, and that once cost the archive ~150 messages a day.
+pub(crate) fn connect(path: &Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(conn)
 }
 
-// turso hands back an owned Value per column; the tenants all speak text and int, so the
-// unwrapping lives here once instead of five times.
-
-pub(crate) fn null_text(value: Option<String>) -> Value {
-    value.map(Value::Text).unwrap_or(Value::Null)
-}
-
-pub(crate) fn text(row: &Row, idx: usize) -> Result<String> {
-    match row.get_value(idx)? {
-        Value::Text(text) => Ok(text),
-        Value::Null => Ok(String::new()),
-        other => bail!("column {idx} expected text, got {other:?}"),
-    }
-}
-
-pub(crate) fn opt_text(row: &Row, idx: usize) -> Result<Option<String>> {
-    match row.get_value(idx)? {
-        Value::Text(text) => Ok(Some(text)),
-        Value::Null => Ok(None),
-        other => bail!("column {idx} expected text or null, got {other:?}"),
-    }
-}
-
-pub(crate) fn int(row: &Row, idx: usize) -> Result<i64> {
-    match row.get_value(idx)? {
-        Value::Integer(value) => Ok(value),
-        other => bail!("column {idx} expected integer, got {other:?}"),
-    }
+fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    conn.prepare("select 1 from sqlite_master where name = ?1")?.exists([name])
 }
