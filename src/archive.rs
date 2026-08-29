@@ -203,8 +203,8 @@ impl MessageStore {
                 sql.push_str(&format!(" and ({})", ors.join(" or ")));
             }
             if let Some(text) = &query.text {
-                params.push(Value::Text(format!("%{text}%")));
-                sql.push_str(&format!(" and content like ?{}", params.len()));
+                params.push(Value::Text(like_pattern(text)));
+                sql.push_str(&format!(" and content like ?{} escape '\\'", params.len()));
             }
 
             params.push(Value::Integer(i64::from(query.limit)));
@@ -245,6 +245,10 @@ fn fts_query(query: &str) -> Result<String> {
         bail!("search query is empty");
     }
     Ok(tokens.join(" "))
+}
+
+fn like_pattern(text: &str) -> String {
+    format!("%{}%", text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))
 }
 
 fn mention_haystack(ids: &[String]) -> String {

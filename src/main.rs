@@ -1,6 +1,8 @@
 mod archive;
 mod auth;
 mod config;
+#[cfg(test)]
+mod contract_tests;
 mod discord;
 mod gateway;
 mod layout;
