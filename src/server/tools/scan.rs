@@ -4,12 +4,12 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde::{Deserialize, Serialize};
-use serenity::model::channel::Message;
+use serenity::model::channel::{GuildChannel, Message};
 use serenity::model::id::ChannelId;
 use serenity::http::MessagePagination;
 
 use crate::archive::ScanQuery;
-use crate::discord::types::{messages_block, render_messages};
+use crate::discord::types::{channel_header, messages_block, render_messages};
 use crate::server::KurouServer;
 use crate::server::tools::common::{parse_channel, parse_message, tool_error};
 
@@ -128,15 +128,17 @@ impl KurouServer {
         };
 
         let scan = store.scan(query).await.map_err(tool_error)?;
+        let client = self.client_for_channel(channel).await;
+        let context = client.channel(channel).await.ok().flatten();
         let floor = scan.floor.map(|id| id.to_string()).unwrap_or_else(|| "none".to_string());
         let meta = format!(
             "[scan] source=archive matches={} archive_floor={floor} (older than the floor is only in source=rest)",
             scan.matches.len()
         );
         if scan.matches.is_empty() {
-            Ok(format!("{meta}\n(no matches)"))
+            Ok(render_scan(&meta, context.as_ref(), "(no matches)".to_string(), false))
         } else {
-            Ok(format!("{meta}\n\n{}", render_messages(&scan.matches)))
+            Ok(render_scan(&meta, context.as_ref(), render_messages(&scan.matches), true))
         }
     }
 
@@ -194,7 +196,8 @@ impl KurouServer {
             }
         }
 
-        Ok(render_rest(scanned, pages, reached_cap, oldest, &matches))
+        let context = client.channel(channel).await.ok().flatten();
+        Ok(render_rest(scanned, pages, reached_cap, oldest, &matches, context.as_ref()))
     }
 }
 
@@ -207,16 +210,24 @@ fn parse_source(raw: Option<&str>) -> Result<Source, String> {
     }
 }
 
-fn render_rest(scanned: usize, pages: u8, reached_cap: bool, oldest: Option<u64>, matches: &[Message]) -> String {
+fn render_rest(scanned: usize, pages: u8, reached_cap: bool, oldest: Option<u64>, matches: &[Message], context: Option<&GuildChannel>) -> String {
     let oldest = oldest.map(|id| id.to_string()).unwrap_or_else(|| "none".to_string());
     let meta = format!(
         "[scan] source=rest scanned={scanned} pages={pages} reached_cap={reached_cap} oldest_scanned_id={oldest} matches={}",
         matches.len()
     );
     if matches.is_empty() {
-        format!("{meta}\n(no matches)")
+        render_scan(&meta, context, "(no matches)".to_string(), false)
     } else {
-        format!("{meta}\n\n{}", messages_block(matches))
+        render_scan(&meta, context, messages_block(matches), true)
+    }
+}
+
+fn render_scan(meta: &str, context: Option<&GuildChannel>, body: String, has_messages: bool) -> String {
+    match context {
+        Some(channel) => format!("{meta}\n\n{}\n\n{body}", channel_header(channel)),
+        None if has_messages => format!("{meta}\n\n{body}"),
+        None => format!("{meta}\n{body}"),
     }
 }
 

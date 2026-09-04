@@ -43,6 +43,11 @@ impl From<GuildChannel> for ChannelInfo {
     }
 }
 
+pub fn channel_header(channel: &GuildChannel) -> String {
+    let parent = channel.parent_id.map(|id| format!(", parent_id={id}")).unwrap_or_default();
+    format!("in: [id={}, name={}, kind={:?}{parent}]", channel.id, quote_header(&channel.name), channel.kind)
+}
+
 #[derive(Serialize)]
 pub struct MessageInfo {
     pub id: String,
@@ -384,6 +389,19 @@ fn short_inline(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renders_channel_header() {
+        let mut channel = GuildChannel::default();
+        channel.id = serenity::model::id::ChannelId::new(42);
+        channel.name = "the \"thread\" title".to_owned();
+        channel.kind = serenity::model::channel::ChannelType::PublicThread;
+        channel.parent_id = Some(serenity::model::id::ChannelId::new(7));
+
+        assert_eq!(channel_header(&channel), "in: [id=42, name=\"the \\\"thread\\\" title\", kind=PublicThread, parent_id=7]");
+        channel.parent_id = None;
+        assert_eq!(channel_header(&channel), "in: [id=42, name=\"the \\\"thread\\\" title\", kind=PublicThread]");
+    }
 
     #[test]
     fn renders_all_the_trimmings() {

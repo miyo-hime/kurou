@@ -3,8 +3,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde::{Deserialize, Serialize};
 use serenity::http::MessagePagination;
+use serenity::model::channel::GuildChannel;
 
-use crate::discord::types::messages_block;
+use crate::discord::types::{channel_header, messages_block};
 use crate::server::KurouServer;
 use crate::server::tools::common::{parse_channel, parse_message, tool_error};
 
@@ -66,16 +67,11 @@ impl KurouServer {
         let anchor = build_anchor(around, before, after)?;
         // 3am-me clamp: no yanking the whole backlog in one call
         let limit = limit.unwrap_or(50).clamp(1, 100);
-        let messages = self
-            .client_for_channel(channel)
-            .await
-            .messages(channel, anchor, limit)
-            .await
-            .map_err(tool_error)?;
-        if messages.is_empty() {
-            return Ok("(no messages)".to_string());
-        }
-        Ok(messages_block(&messages))
+        let client = self.client_for_channel(channel).await;
+        let messages = client.messages(channel, anchor, limit).await.map_err(tool_error)?;
+        let context = client.channel(channel).await.ok().flatten();
+        let body = if messages.is_empty() { "(no messages)".to_string() } else { messages_block(&messages) };
+        Ok(with_channel_header(context.as_ref(), body))
     }
 
     #[tool(
@@ -91,13 +87,10 @@ impl KurouServer {
     ) -> Result<String, String> {
         let channel = parse_channel(&channel_id)?;
         let message_id = parse_message(&message_id)?;
-        let message = self
-            .client_for_channel(channel)
-            .await
-            .message(channel, message_id)
-            .await
-            .map_err(tool_error)?;
-        Ok(messages_block(std::slice::from_ref(&message)))
+        let client = self.client_for_channel(channel).await;
+        let message = client.message(channel, message_id).await.map_err(tool_error)?;
+        let context = client.channel(channel).await.ok().flatten();
+        Ok(with_channel_header(context.as_ref(), messages_block(std::slice::from_ref(&message))))
     }
 
     #[tool(
@@ -109,16 +102,18 @@ impl KurouServer {
         Parameters(GetPinnedRequest { channel_id }): Parameters<GetPinnedRequest>,
     ) -> Result<String, String> {
         let channel = parse_channel(&channel_id)?;
-        let messages = self
-            .client_for_channel(channel)
-            .await
-            .pins(channel)
-            .await
-            .map_err(tool_error)?;
-        if messages.is_empty() {
-            return Ok("(no pinned messages)".to_string());
-        }
-        Ok(messages_block(&messages))
+        let client = self.client_for_channel(channel).await;
+        let messages = client.pins(channel).await.map_err(tool_error)?;
+        let context = client.channel(channel).await.ok().flatten();
+        let body = if messages.is_empty() { "(no pinned messages)".to_string() } else { messages_block(&messages) };
+        Ok(with_channel_header(context.as_ref(), body))
+    }
+}
+
+fn with_channel_header(channel: Option<&GuildChannel>, body: String) -> String {
+    match channel {
+        Some(channel) => format!("{}\n\n{body}", channel_header(channel)),
+        None => body,
     }
 }
 

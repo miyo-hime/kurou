@@ -33,6 +33,10 @@ impl DiscordClient {
         Ok(self.http.get_channels(guild_id).await?)
     }
 
+    pub async fn channel(&self, channel_id: ChannelId) -> Result<Option<GuildChannel>> {
+        Ok(self.http.get_channel(channel_id).await?.guild())
+    }
+
     pub async fn messages(
         &self,
         channel_id: ChannelId,
