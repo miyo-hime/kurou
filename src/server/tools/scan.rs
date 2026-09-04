@@ -9,9 +9,9 @@ use serenity::model::id::ChannelId;
 use serenity::http::MessagePagination;
 
 use crate::archive::ScanQuery;
-use crate::discord::types::{channel_header, messages_block, render_messages};
+use crate::discord::types::{RenderedMessage, channel_header, render_messages};
 use crate::server::KurouServer;
-use crate::server::tools::common::{parse_channel, parse_message, tool_error};
+use crate::server::tools::common::{enrich_display_names, parse_channel, parse_message, tool_error};
 
 const PAGE_SIZE: u8 = 100;
 const DEFAULT_MAX_PAGES: u8 = 10;
@@ -197,7 +197,11 @@ impl KurouServer {
         }
 
         let context = client.channel(channel).await.ok().flatten();
-        Ok(render_rest(scanned, pages, reached_cap, oldest, &matches, context.as_ref()))
+        let mut rendered = matches.iter().map(RenderedMessage::from).collect::<Vec<_>>();
+        if let Some(guild) = context.as_ref().map(|c| c.guild_id) {
+            enrich_display_names(client, guild, &mut rendered).await;
+        }
+        Ok(render_rest(scanned, pages, reached_cap, oldest, &rendered, context.as_ref()))
     }
 }
 
@@ -210,7 +214,7 @@ fn parse_source(raw: Option<&str>) -> Result<Source, String> {
     }
 }
 
-fn render_rest(scanned: usize, pages: u8, reached_cap: bool, oldest: Option<u64>, matches: &[Message], context: Option<&GuildChannel>) -> String {
+fn render_rest(scanned: usize, pages: u8, reached_cap: bool, oldest: Option<u64>, matches: &[RenderedMessage], context: Option<&GuildChannel>) -> String {
     let oldest = oldest.map(|id| id.to_string()).unwrap_or_else(|| "none".to_string());
     let meta = format!(
         "[scan] source=rest scanned={scanned} pages={pages} reached_cap={reached_cap} oldest_scanned_id={oldest} matches={}",
@@ -219,7 +223,7 @@ fn render_rest(scanned: usize, pages: u8, reached_cap: bool, oldest: Option<u64>
     if matches.is_empty() {
         render_scan(&meta, context, "(no matches)".to_string(), false)
     } else {
-        render_scan(&meta, context, messages_block(matches), true)
+        render_scan(&meta, context, render_messages(matches), true)
     }
 }
 

@@ -1,5 +1,10 @@
+use std::collections::HashMap;
+
 use serde::Serialize;
-use serenity::model::id::{ChannelId, GuildId, MessageId};
+use serenity::model::id::{ChannelId, GuildId, MessageId, UserId};
+
+use crate::discord::client::DiscordClient;
+use crate::discord::types::RenderedMessage;
 
 pub fn tool_error(error: anyhow::Error) -> String {
     error.to_string()
@@ -40,4 +45,24 @@ fn parse_snowflake(raw: &str) -> Result<u64, String> {
     raw.trim()
         .parse::<u64>()
         .map_err(|_| format!("'{raw}' is not a valid snowflake id"))
+}
+
+// REST messages arrive memberless, so nicknames need a lookup - deduped per call,
+// and a failed fetch just leaves whatever name the payload already gave us.
+pub async fn enrich_display_names(client: &DiscordClient, guild: GuildId, messages: &mut [RenderedMessage]) {
+    let mut looked_up: HashMap<String, Option<String>> = HashMap::new();
+    for message in messages.iter_mut() {
+        if !looked_up.contains_key(&message.author_id) {
+            let display = match message.author_id.parse::<u64>() {
+                Ok(id) => client.member(guild, UserId::new(id)).await.ok().and_then(|member| {
+                    member.nick.clone().or_else(|| member.user.global_name.clone()).filter(|name| name != &member.user.name)
+                }),
+                Err(_) => None,
+            };
+            looked_up.insert(message.author_id.clone(), display);
+        }
+        if let Some(display) = &looked_up[&message.author_id] {
+            message.author_display = Some(display.clone());
+        }
+    }
 }

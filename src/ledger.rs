@@ -32,6 +32,11 @@ impl Ledger {
             // the existing rows. rebuild on an empty table is free, so first boot is too.
             let fresh_fts = !table_exists(&conn, "msg_fts").context("check for fts table")?;
             conn.execute_batch(crate::archive::SCHEMA).context("archive schema")?;
+            // pre-0.11 archives lack author_display; the duplicate-column error means it's already there
+            if let Err(error) = conn.execute("alter table messages add column author_display text", [])
+                && !error.to_string().contains("duplicate column") {
+                return Err(error).context("add author_display column");
+            }
             if fresh_fts {
                 tracing::info!("building the fts index over the archive");
                 conn.execute("insert into msg_fts(msg_fts) values ('rebuild')", [])

@@ -44,6 +44,15 @@ impl From<GuildChannel> for ChannelInfo {
     }
 }
 
+pub fn display_name(message: &Message) -> Option<String> {
+    message
+        .member
+        .as_ref()
+        .and_then(|member| member.nick.clone())
+        .or_else(|| message.author.global_name.clone())
+        .filter(|name| name != &message.author.name)
+}
+
 pub fn channel_header(channel: &GuildChannel) -> String {
     let parent = channel.parent_id.map(|id| format!(", parent_id={id}")).unwrap_or_default();
     format!("in: [id={}, name={}, kind={:?}{parent}]", channel.id, quote_header(&channel.name), channel.kind)
@@ -78,6 +87,8 @@ pub struct RenderedMessage {
     pub id: String,
     pub author_id: String,
     pub author_name: String,
+    #[serde(default)]
+    pub author_display: Option<String>,
     pub timestamp: String,
     pub edited_timestamp: Option<String>,
     // serde(default) on the newcomers: archive rows written before 0.10 don't carry them
@@ -101,6 +112,8 @@ pub struct RenderedReply {
     pub unavailable: bool,
     pub id: String,
     pub author_name: String,
+    #[serde(default)]
+    pub author_display: Option<String>,
     pub snippet: String,
 }
 
@@ -172,12 +185,14 @@ impl From<&Message> for RenderedMessage {
                 unavailable: false,
                 id: parent.id.to_string(),
                 author_name: parent.author.name.clone(),
+                author_display: display_name(parent),
                 snippet: short_inline(&parent.content),
             }),
             None if message.message_reference.is_some() && !is_forward => Some(RenderedReply {
                 unavailable: true,
                 id: String::new(),
                 author_name: String::new(),
+                author_display: None,
                 snippet: String::new(),
             }),
             _ => None,
@@ -201,6 +216,7 @@ impl From<&Message> for RenderedMessage {
             id: message.id.to_string(),
             author_id: message.author.id.to_string(),
             author_name: message.author.name.clone(),
+            author_display: display_name(message),
             timestamp: message.timestamp.to_string(),
             edited_timestamp: message.edited_timestamp.map(|edited| edited.to_string()),
             kind,
@@ -285,12 +301,6 @@ impl From<&Embed> for RenderedEmbed {
     }
 }
 
-// the REST callers still hand over live Messages; they map through the intermediate here.
-pub fn messages_block(messages: &[Message]) -> String {
-    let rendered = messages.iter().map(RenderedMessage::from).collect::<Vec<_>>();
-    render_messages(&rendered)
-}
-
 pub fn render_messages(messages: &[RenderedMessage]) -> String {
     let mut output = String::new();
 
@@ -301,10 +311,10 @@ pub fn render_messages(messages: &[RenderedMessage]) -> String {
 
         let _ = writeln!(
             output,
-            "[id={}, author_id={}, author_name={}, timestamp={}]",
+            "[id={}, author_id={}, author={}, timestamp={}]",
             message.id,
             message.author_id,
-            quote_header(&message.author_name),
+            author_label(message.author_display.as_deref(), &message.author_name),
             message.timestamp
         );
 
@@ -437,11 +447,19 @@ fn format_reply(reply: &RenderedReply) -> String {
         return "reply-to: <unavailable>".to_string();
     }
     format!(
-        "reply-to: [id={}, author_name={}] {}",
+        "reply-to: [id={}, author={}] {}",
         reply.id,
-        quote_header(&reply.author_name),
+        author_label(reply.author_display.as_deref(), &reply.author_name),
         reply.snippet
     )
+}
+
+// nickname first, handle in parens - the order says which name the room actually uses
+fn author_label(display: Option<&str>, username: &str) -> String {
+    match display {
+        Some(display) => format!("{} (@{username})", quote_header(display)),
+        None => quote_header(username),
+    }
 }
 
 fn quote_header(value: &str) -> String {
@@ -552,6 +570,7 @@ mod tests {
             id: "42".to_owned(),
             author_id: "7".to_owned(),
             author_name: "koma".to_owned(),
+            author_display: None,
             timestamp: "2026-07-01T00:00:00Z".to_owned(),
             edited_timestamp: Some("2026-07-01T00:01:00Z".to_owned()),
             kind: None,
@@ -561,6 +580,7 @@ mod tests {
                 unavailable: false,
                 id: "41".to_owned(),
                 author_name: "kurone".to_owned(),
+                author_display: None,
                 snippet: "the cat asks".to_owned(),
             }),
             reactions: vec![RenderedReaction { label: "🐦".to_owned(), count: 3 }],
@@ -585,9 +605,9 @@ mod tests {
             content: "look up".to_owned(),
         };
 
-        let expected = "[id=42, author_id=7, author_name=\"koma\", timestamp=2026-07-01T00:00:00Z]\n\
+        let expected = "[id=42, author_id=7, author=\"koma\", timestamp=2026-07-01T00:00:00Z]\n\
             edited: 2026-07-01T00:01:00Z\n\
-            reply-to: [id=41, author_name=\"kurone\"] the cat asks\n\
+            reply-to: [id=41, author=\"kurone\"] the cat asks\n\
             reactions: 🐦 x3\n\
             attachments:\n\
             - id=9 filename=\"moon.png\" size=2048b type=\"image/png\" dimensions=800x600 url=https://cdn/moon.png\n\
@@ -604,6 +624,7 @@ mod tests {
             id: "1".to_owned(),
             author_id: "2".to_owned(),
             author_name: "koma".to_owned(),
+            author_display: None,
             timestamp: "t".to_owned(),
             edited_timestamp: None,
             kind: None,
@@ -633,6 +654,7 @@ mod tests {
             id: "50".to_owned(),
             author_id: "7".to_owned(),
             author_name: "miyo".to_owned(),
+            author_display: None,
             timestamp: "2026-08-10T12:00:00Z".to_owned(),
             edited_timestamp: None,
             kind: None,
@@ -660,7 +682,7 @@ mod tests {
             content: "look at this".to_owned(),
         };
 
-        let expected = "[id=50, author_id=7, author_name=\"miyo\", timestamp=2026-08-10T12:00:00Z]\n\
+        let expected = "[id=50, author_id=7, author=\"miyo\", timestamp=2026-08-10T12:00:00Z]\n\
             forwarded: [timestamp=2026-08-09T09:00:00Z]\n\
             forwarded attachments:\n\
             - id=9 filename=\"setup.png\" size=1024b url=https://cdn/setup.png\n\
@@ -677,6 +699,7 @@ mod tests {
             id: "51".to_owned(),
             author_id: "7".to_owned(),
             author_name: "miyo".to_owned(),
+            author_display: None,
             timestamp: "t".to_owned(),
             edited_timestamp: None,
             kind: None,
@@ -699,12 +722,18 @@ mod tests {
             content: String::new(),
         };
 
-        let expected = "[id=51, author_id=7, author_name=\"miyo\", timestamp=t]\n\
+        let expected = "[id=51, author_id=7, author=\"miyo\", timestamp=t]\n\
             poll: \"best rabbit?\" (multiselect) (expires 2026-08-11T00:00:00Z)\n\
             - pyonka x3\n\
             - furin\n";
 
         assert_eq!(render_messages(std::slice::from_ref(&message)), expected);
+    }
+
+    #[test]
+    fn nicknames_lead_and_handles_follow() {
+        assert_eq!(author_label(Some("Kanemitsu Enjoyer #4"), "xkmt"), "\"Kanemitsu Enjoyer #4\" (@xkmt)");
+        assert_eq!(author_label(None, "miyo_rin"), "\"miyo_rin\"");
     }
 
     #[test]

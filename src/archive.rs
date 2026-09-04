@@ -31,6 +31,7 @@ pub struct MessageHit {
     pub channel_id: String,
     pub author_id: String,
     pub author_name: String,
+    pub author_display: Option<String>,
     pub content: String,
     pub timestamp: String,
 }
@@ -61,6 +62,7 @@ pub(crate) const SCHEMA: &str = r#"
         channel_id text not null,
         author_id text not null,
         author_name text not null,
+        author_display text,
         content text not null,
         mention_ids text not null default '',
         timestamp text not null,
@@ -106,9 +108,9 @@ impl MessageStore {
                 .execute(
                     r#"
                     insert or ignore into messages (
-                        message_id, guild_id, channel_id, author_id, author_name,
+                        message_id, guild_id, channel_id, author_id, author_name, author_display,
                         content, mention_ids, timestamp, payload
-                    ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                     "#,
                     params![
                         snowflake,
@@ -116,6 +118,7 @@ impl MessageStore {
                         message.channel_id,
                         message.rendered.author_id,
                         message.rendered.author_name,
+                        message.rendered.author_display,
                         message.rendered.content,
                         mention_ids,
                         message.rendered.timestamp,
@@ -137,7 +140,7 @@ impl MessageStore {
             let mut stmt = conn
                 .prepare(
                     r#"
-                    select m.message_id, m.guild_id, m.channel_id, m.author_id, m.author_name, m.content, m.timestamp
+                    select m.message_id, m.guild_id, m.channel_id, m.author_id, m.author_name, m.author_display, m.content, m.timestamp
                     from msg_fts join messages m on m.message_id = msg_fts.rowid
                     where msg_fts match ?1
                     order by m.message_id desc
@@ -153,8 +156,9 @@ impl MessageStore {
                         channel_id: row.get(2)?,
                         author_id: row.get(3)?,
                         author_name: row.get(4)?,
-                        content: row.get(5)?,
-                        timestamp: row.get(6)?,
+                        author_display: row.get(5)?,
+                        content: row.get(6)?,
+                        timestamp: row.get(7)?,
                     })
                 })
                 .context("search messages")?
@@ -269,6 +273,7 @@ mod tests {
                 id: id.to_string(),
                 author_id: author.to_owned(),
                 author_name: author.to_owned(),
+                author_display: None,
                 timestamp: "2026-07-01T00:00:00Z".to_owned(),
                 edited_timestamp: None,
                 kind: None,

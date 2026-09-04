@@ -43,6 +43,7 @@ fn message(id: i64, channel: &str, author: &str, content: &str, mentions: &[&str
             id: id.to_string(),
             author_id: author.to_owned(),
             author_name: format!("name-{author}"),
+            author_display: None,
             timestamp: format!("2026-07-01T00:00:{:02}Z", id.rem_euclid(60)),
             edited_timestamp: None,
             kind: None,
@@ -320,6 +321,7 @@ async fn scan_round_trips_the_complete_rendered_message() {
         id: "909".to_owned(),
         author_id: "author".to_owned(),
         author_name: "Crow Name".to_owned(),
+        author_display: Some("The Crow".to_owned()),
         timestamp: "2026-09-09T09:09:09Z".to_owned(),
         edited_timestamp: Some("2026-09-09T10:10:10Z".to_owned()),
         kind: Some("PinsAdd".to_owned()),
@@ -327,6 +329,7 @@ async fn scan_round_trips_the_complete_rendered_message() {
             unavailable: false,
             id: "808".to_owned(),
             author_name: "Parent".to_owned(),
+            author_display: None,
             snippet: "parent snippet".to_owned(),
         }),
         forwarded: Some(RenderedForward {

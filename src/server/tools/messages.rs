@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use serenity::http::MessagePagination;
 use serenity::model::channel::GuildChannel;
 
-use crate::discord::types::{channel_header, messages_block};
+use crate::discord::types::{RenderedMessage, channel_header, render_messages};
 use crate::server::KurouServer;
-use crate::server::tools::common::{parse_channel, parse_message, tool_error};
+use crate::server::tools::common::{enrich_display_names, parse_channel, parse_message, tool_error};
 
 pub fn router() -> ToolRouter<KurouServer> {
     KurouServer::messages_router()
@@ -70,7 +70,11 @@ impl KurouServer {
         let client = self.client_for_channel(channel).await;
         let messages = client.messages(channel, anchor, limit).await.map_err(tool_error)?;
         let context = client.channel(channel).await.ok().flatten();
-        let body = if messages.is_empty() { "(no messages)".to_string() } else { messages_block(&messages) };
+        let mut rendered = messages.iter().map(RenderedMessage::from).collect::<Vec<_>>();
+        if let Some(guild) = context.as_ref().map(|c| c.guild_id) {
+            enrich_display_names(client, guild, &mut rendered).await;
+        }
+        let body = if rendered.is_empty() { "(no messages)".to_string() } else { render_messages(&rendered) };
         Ok(with_channel_header(context.as_ref(), body))
     }
 
@@ -90,7 +94,11 @@ impl KurouServer {
         let client = self.client_for_channel(channel).await;
         let message = client.message(channel, message_id).await.map_err(tool_error)?;
         let context = client.channel(channel).await.ok().flatten();
-        Ok(with_channel_header(context.as_ref(), messages_block(std::slice::from_ref(&message))))
+        let mut rendered = vec![RenderedMessage::from(&message)];
+        if let Some(guild) = context.as_ref().map(|c| c.guild_id) {
+            enrich_display_names(client, guild, &mut rendered).await;
+        }
+        Ok(with_channel_header(context.as_ref(), render_messages(&rendered)))
     }
 
     #[tool(
@@ -105,7 +113,11 @@ impl KurouServer {
         let client = self.client_for_channel(channel).await;
         let messages = client.pins(channel).await.map_err(tool_error)?;
         let context = client.channel(channel).await.ok().flatten();
-        let body = if messages.is_empty() { "(no pinned messages)".to_string() } else { messages_block(&messages) };
+        let mut rendered = messages.iter().map(RenderedMessage::from).collect::<Vec<_>>();
+        if let Some(guild) = context.as_ref().map(|c| c.guild_id) {
+            enrich_display_names(client, guild, &mut rendered).await;
+        }
+        let body = if rendered.is_empty() { "(no pinned messages)".to_string() } else { render_messages(&rendered) };
         Ok(with_channel_header(context.as_ref(), body))
     }
 }

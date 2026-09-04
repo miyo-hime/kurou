@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 
 use crate::archive::{MessageStore, NewMessage};
 use crate::config::GatewayMode;
-use crate::discord::types::RenderedMessage;
+use crate::discord::types::{RenderedMessage, display_name};
 use crate::mentions::{MentionStore, NewMention};
 use crate::wall::event::{WallFanout, enrich};
 
@@ -211,12 +211,3 @@ fn matched_terms(message: &Message, bot_user_id: UserId, keywords: &[String]) ->
     matched
 }
 
-fn display_name(message: &Message) -> Option<String> {
-    message.member.as_ref().and_then(|member| {
-        member
-            .nick
-            .clone()
-            .or_else(|| message.author.global_name.clone())
-            .filter(|name| name != &message.author.name)
-    })
-}
