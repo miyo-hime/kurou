@@ -1,9 +1,10 @@
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
-use serenity::model::channel::{Attachment, Embed, GuildChannel, Message, ReactionType};
+use serenity::model::channel::{Attachment, Embed, GuildChannel, Message, MessageReferenceKind, MessageType, Poll, PollMedia, PollMediaEmoji, ReactionType};
 use serenity::model::guild::Member;
 use serenity::model::guild::PartialGuild;
+use serenity::model::sticker::StickerItem;
 
 #[derive(Serialize)]
 pub struct ServerInfo {
@@ -79,7 +80,14 @@ pub struct RenderedMessage {
     pub author_name: String,
     pub timestamp: String,
     pub edited_timestamp: Option<String>,
+    // serde(default) on the newcomers: archive rows written before 0.10 don't carry them
+    #[serde(default)]
+    pub kind: Option<String>,
     pub reply: Option<RenderedReply>,
+    #[serde(default)]
+    pub forwarded: Option<RenderedForward>,
+    #[serde(default)]
+    pub poll: Option<RenderedPoll>,
     pub reactions: Vec<RenderedReaction>,
     pub attachments: Vec<RenderedAttachment>,
     pub stickers: Vec<RenderedSticker>,
@@ -94,6 +102,30 @@ pub struct RenderedReply {
     pub id: String,
     pub author_name: String,
     pub snippet: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RenderedForward {
+    pub timestamp: String,
+    pub content: String,
+    pub attachments: Vec<RenderedAttachment>,
+    pub stickers: Vec<RenderedSticker>,
+    pub embeds: Vec<RenderedEmbed>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RenderedPoll {
+    pub question: String,
+    pub multiselect: bool,
+    pub finalized: bool,
+    pub expiry: Option<String>,
+    pub answers: Vec<RenderedPollAnswer>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RenderedPollAnswer {
+    pub text: String,
+    pub votes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,6 +165,8 @@ pub struct RenderedEmbed {
 
 impl From<&Message> for RenderedMessage {
     fn from(message: &Message) -> Self {
+        // a forward wears message_reference too - without the kind check it rendered as "reply-to: <unavailable>"
+        let is_forward = message.message_reference.as_ref().is_some_and(|reference| reference.kind == MessageReferenceKind::Forward);
         let reply = match message.referenced_message.as_deref() {
             Some(parent) => Some(RenderedReply {
                 unavailable: false,
@@ -140,13 +174,27 @@ impl From<&Message> for RenderedMessage {
                 author_name: parent.author.name.clone(),
                 snippet: short_inline(&parent.content),
             }),
-            None if message.message_reference.is_some() => Some(RenderedReply {
+            None if message.message_reference.is_some() && !is_forward => Some(RenderedReply {
                 unavailable: true,
                 id: String::new(),
                 author_name: String::new(),
                 snippet: String::new(),
             }),
-            None => None,
+            _ => None,
+        };
+
+        // discord omits the snapshot's author on purpose: the forwarder is the top-level author
+        let forwarded = message.message_snapshots.first().map(|snapshot| RenderedForward {
+            timestamp: snapshot.timestamp.to_string(),
+            content: snapshot.content.clone(),
+            attachments: snapshot.attachments.iter().map(RenderedAttachment::from).collect(),
+            stickers: snapshot.sticker_items.iter().map(rendered_sticker).collect(),
+            embeds: snapshot.embeds.iter().map(RenderedEmbed::from).collect(),
+        });
+
+        let kind = match message.kind {
+            MessageType::Regular | MessageType::InlineReply => None,
+            other => Some(format!("{other:?}")),
         };
 
         Self {
@@ -155,7 +203,10 @@ impl From<&Message> for RenderedMessage {
             author_name: message.author.name.clone(),
             timestamp: message.timestamp.to_string(),
             edited_timestamp: message.edited_timestamp.map(|edited| edited.to_string()),
+            kind,
             reply,
+            forwarded,
+            poll: message.poll.as_deref().map(rendered_poll),
             reactions: message
                 .reactions
                 .iter()
@@ -165,19 +216,45 @@ impl From<&Message> for RenderedMessage {
                 })
                 .collect(),
             attachments: message.attachments.iter().map(RenderedAttachment::from).collect(),
-            stickers: message
-                .sticker_items
-                .iter()
-                .map(|sticker| RenderedSticker {
-                    id: sticker.id.to_string(),
-                    name: sticker.name.clone(),
-                    format: format!("{:?}", sticker.format_type),
-                    url: sticker.image_url().unwrap_or_else(|| "no-url".to_string()),
-                })
-                .collect(),
+            stickers: message.sticker_items.iter().map(rendered_sticker).collect(),
             embeds: message.embeds.iter().map(RenderedEmbed::from).collect(),
             content: message.content.clone(),
         }
+    }
+}
+
+fn rendered_sticker(sticker: &StickerItem) -> RenderedSticker {
+    RenderedSticker {
+        id: sticker.id.to_string(),
+        name: sticker.name.clone(),
+        format: format!("{:?}", sticker.format_type),
+        url: sticker.image_url().unwrap_or_else(|| "no-url".to_string()),
+    }
+}
+
+fn rendered_poll(poll: &Poll) -> RenderedPoll {
+    RenderedPoll {
+        question: poll_media_text(&poll.question),
+        multiselect: poll.allow_multiselect,
+        finalized: poll.results.as_ref().is_some_and(|results| results.is_finalized),
+        expiry: poll.expiry.map(|expiry| expiry.to_string()),
+        answers: poll
+            .answers
+            .iter()
+            .map(|answer| RenderedPollAnswer {
+                text: poll_media_text(&answer.poll_media),
+                votes: poll.results.as_ref().and_then(|results| results.answer_counts.iter().find(|count| count.id == answer.answer_id).map(|count| count.count)),
+            })
+            .collect(),
+    }
+}
+
+fn poll_media_text(media: &PollMedia) -> String {
+    let text = media.text.as_deref().unwrap_or_default();
+    match &media.emoji {
+        Some(PollMediaEmoji::Name(name)) if text.is_empty() => name.clone(),
+        Some(PollMediaEmoji::Name(name)) => format!("{name} {text}"),
+        _ => text.to_string(),
     }
 }
 
@@ -231,6 +308,10 @@ pub fn render_messages(messages: &[RenderedMessage]) -> String {
             message.timestamp
         );
 
+        if let Some(kind) = &message.kind {
+            let _ = writeln!(output, "type: {kind}");
+        }
+
         if let Some(edited) = &message.edited_timestamp {
             let _ = writeln!(output, "edited: {edited}");
         }
@@ -278,12 +359,74 @@ pub fn render_messages(messages: &[RenderedMessage]) -> String {
             }
         }
 
+        if let Some(forward) = &message.forwarded {
+            output.push_str(&format_forward(forward));
+        }
+
+        if let Some(poll) = &message.poll {
+            output.push_str(&format_poll(poll));
+        }
+
         if !message.content.is_empty() {
             output.push_str(&message.content);
             if !message.content.ends_with('\n') {
                 output.push('\n');
             }
         }
+    }
+
+    output
+}
+
+fn format_forward(forward: &RenderedForward) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "forwarded: [timestamp={}]", forward.timestamp);
+
+    if !forward.attachments.is_empty() {
+        output.push_str("forwarded attachments:\n");
+        for attachment in &forward.attachments {
+            let _ = writeln!(output, "- {}", format_attachment(attachment));
+        }
+    }
+
+    if !forward.stickers.is_empty() {
+        output.push_str("forwarded stickers:\n");
+        for sticker in &forward.stickers {
+            let _ = writeln!(output, "- id={} name={} format={} url={}", sticker.id, quote_header(&sticker.name), sticker.format, sticker.url);
+        }
+    }
+
+    let embed_lines = forward.embeds.iter().filter_map(format_embed).collect::<Vec<_>>();
+    if !embed_lines.is_empty() {
+        output.push_str("forwarded embeds:\n");
+        for embed in embed_lines {
+            let _ = writeln!(output, "- {embed}");
+        }
+    }
+
+    for line in forward.content.lines() {
+        let _ = writeln!(output, "> {line}");
+    }
+
+    output
+}
+
+fn format_poll(poll: &RenderedPoll) -> String {
+    let mut output = String::new();
+    let mut header = format!("poll: {}", quote_header(&poll.question));
+    if poll.multiselect {
+        header.push_str(" (multiselect)");
+    }
+    if poll.finalized {
+        header.push_str(" (final)");
+    } else if let Some(expiry) = &poll.expiry {
+        let _ = write!(header, " (expires {expiry})");
+    }
+    let _ = writeln!(output, "{header}");
+
+    for answer in &poll.answers {
+        let votes = answer.votes.map(|count| format!(" x{count}")).unwrap_or_default();
+        let _ = writeln!(output, "- {}{votes}", answer.text);
     }
 
     output
@@ -411,6 +554,9 @@ mod tests {
             author_name: "koma".to_owned(),
             timestamp: "2026-07-01T00:00:00Z".to_owned(),
             edited_timestamp: Some("2026-07-01T00:01:00Z".to_owned()),
+            kind: None,
+            forwarded: None,
+            poll: None,
             reply: Some(RenderedReply {
                 unavailable: false,
                 id: "41".to_owned(),
@@ -460,7 +606,16 @@ mod tests {
             author_name: "koma".to_owned(),
             timestamp: "t".to_owned(),
             edited_timestamp: None,
+            kind: None,
             reply: None,
+            forwarded: Some(RenderedForward {
+                timestamp: "t0".to_owned(),
+                content: "carried across".to_owned(),
+                attachments: Vec::new(),
+                stickers: Vec::new(),
+                embeds: Vec::new(),
+            }),
+            poll: None,
             reactions: Vec::new(),
             attachments: Vec::new(),
             stickers: Vec::new(),
@@ -470,6 +625,130 @@ mod tests {
         let json = serde_json::to_string(&message).unwrap();
         let back: RenderedMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(render_messages(std::slice::from_ref(&message)), render_messages(std::slice::from_ref(&back)));
+    }
+
+    #[test]
+    fn renders_a_forward_with_the_forwarder_note() {
+        let message = RenderedMessage {
+            id: "50".to_owned(),
+            author_id: "7".to_owned(),
+            author_name: "miyo".to_owned(),
+            timestamp: "2026-08-10T12:00:00Z".to_owned(),
+            edited_timestamp: None,
+            kind: None,
+            reply: None,
+            forwarded: Some(RenderedForward {
+                timestamp: "2026-08-09T09:00:00Z".to_owned(),
+                content: "anima setup notes\nline two".to_owned(),
+                attachments: vec![RenderedAttachment {
+                    id: "9".to_owned(),
+                    filename: "setup.png".to_owned(),
+                    size: 1024,
+                    content_type: None,
+                    description: None,
+                    dimensions: None,
+                    url: "https://cdn/setup.png".to_owned(),
+                }],
+                stickers: Vec::new(),
+                embeds: Vec::new(),
+            }),
+            poll: None,
+            reactions: Vec::new(),
+            attachments: Vec::new(),
+            stickers: Vec::new(),
+            embeds: Vec::new(),
+            content: "look at this".to_owned(),
+        };
+
+        let expected = "[id=50, author_id=7, author_name=\"miyo\", timestamp=2026-08-10T12:00:00Z]\n\
+            forwarded: [timestamp=2026-08-09T09:00:00Z]\n\
+            forwarded attachments:\n\
+            - id=9 filename=\"setup.png\" size=1024b url=https://cdn/setup.png\n\
+            > anima setup notes\n\
+            > line two\n\
+            look at this\n";
+
+        assert_eq!(render_messages(std::slice::from_ref(&message)), expected);
+    }
+
+    #[test]
+    fn renders_a_poll_with_counts() {
+        let message = RenderedMessage {
+            id: "51".to_owned(),
+            author_id: "7".to_owned(),
+            author_name: "miyo".to_owned(),
+            timestamp: "t".to_owned(),
+            edited_timestamp: None,
+            kind: None,
+            reply: None,
+            forwarded: None,
+            poll: Some(RenderedPoll {
+                question: "best rabbit?".to_owned(),
+                multiselect: true,
+                finalized: false,
+                expiry: Some("2026-08-11T00:00:00Z".to_owned()),
+                answers: vec![
+                    RenderedPollAnswer { text: "pyonka".to_owned(), votes: Some(3) },
+                    RenderedPollAnswer { text: "furin".to_owned(), votes: None },
+                ],
+            }),
+            reactions: Vec::new(),
+            attachments: Vec::new(),
+            stickers: Vec::new(),
+            embeds: Vec::new(),
+            content: String::new(),
+        };
+
+        let expected = "[id=51, author_id=7, author_name=\"miyo\", timestamp=t]\n\
+            poll: \"best rabbit?\" (multiselect) (expires 2026-08-11T00:00:00Z)\n\
+            - pyonka x3\n\
+            - furin\n";
+
+        assert_eq!(render_messages(std::slice::from_ref(&message)), expected);
+    }
+
+    #[test]
+    fn a_wire_forward_sheds_the_unavailable_reply_costume() {
+        let payload = serde_json::json!({
+            "id": "1544828810510475394",
+            "channel_id": "1544828810510475000",
+            "author": { "id": "150087922589237248", "username": "miyo_rin", "discriminator": "0", "avatar": null },
+            "content": "",
+            "timestamp": "2026-08-10T12:00:00.000000+00:00",
+            "edited_timestamp": null,
+            "tts": false,
+            "mention_everyone": false,
+            "mentions": [],
+            "mention_roles": [],
+            "attachments": [],
+            "embeds": [],
+            "pinned": false,
+            "type": 0,
+            "message_reference": { "type": 1, "message_id": "111", "channel_id": "222" },
+            "message_snapshots": [ { "message": {
+                "content": "anima setup notes",
+                "timestamp": "2026-08-09T09:00:00.000000+00:00",
+                "edited_timestamp": null,
+                "mentions": [],
+                "attachments": [],
+                "embeds": [],
+                "type": 0,
+                "flags": 0
+            } } ]
+        });
+        let message: Message = serde_json::from_value(payload).unwrap();
+        let rendered = RenderedMessage::from(&message);
+
+        assert!(rendered.reply.is_none(), "a forward must not wear reply-to: <unavailable>");
+        let forward = rendered.forwarded.expect("snapshot should render");
+        assert_eq!(forward.content, "anima setup notes");
+    }
+
+    #[test]
+    fn old_archive_rows_still_deserialize() {
+        let pre_0_10 = r#"{"id":"1","author_id":"2","author_name":"koma","timestamp":"t","edited_timestamp":null,"reply":null,"reactions":[],"attachments":[],"stickers":[],"embeds":[],"content":"hi"}"#;
+        let message: RenderedMessage = serde_json::from_str(pre_0_10).unwrap();
+        assert!(message.forwarded.is_none() && message.poll.is_none() && message.kind.is_none());
     }
 }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::archive::{NewMessage, ScanQuery};
 use crate::discord::types::{
-    RenderedAttachment, RenderedEmbed, RenderedMessage, RenderedReaction, RenderedReply, RenderedSticker,
+    RenderedAttachment, RenderedEmbed, RenderedForward, RenderedMessage, RenderedPoll, RenderedPollAnswer, RenderedReaction, RenderedReply, RenderedSticker,
 };
 use crate::ledger::Ledger;
 
@@ -45,7 +45,10 @@ fn message(id: i64, channel: &str, author: &str, content: &str, mentions: &[&str
             author_name: format!("name-{author}"),
             timestamp: format!("2026-07-01T00:00:{:02}Z", id.rem_euclid(60)),
             edited_timestamp: None,
+            kind: None,
             reply: None,
+            forwarded: None,
+            poll: None,
             reactions: Vec::new(),
             attachments: Vec::new(),
             stickers: Vec::new(),
@@ -319,11 +322,26 @@ async fn scan_round_trips_the_complete_rendered_message() {
         author_name: "Crow Name".to_owned(),
         timestamp: "2026-09-09T09:09:09Z".to_owned(),
         edited_timestamp: Some("2026-09-09T10:10:10Z".to_owned()),
+        kind: Some("PinsAdd".to_owned()),
         reply: Some(RenderedReply {
             unavailable: false,
             id: "808".to_owned(),
             author_name: "Parent".to_owned(),
             snippet: "parent snippet".to_owned(),
+        }),
+        forwarded: Some(RenderedForward {
+            timestamp: "2026-09-08T08:08:08Z".to_owned(),
+            content: "forwarded body".to_owned(),
+            attachments: Vec::new(),
+            stickers: Vec::new(),
+            embeds: Vec::new(),
+        }),
+        poll: Some(RenderedPoll {
+            question: "which bird".to_owned(),
+            multiselect: false,
+            finalized: true,
+            expiry: None,
+            answers: vec![RenderedPollAnswer { text: "crow".to_owned(), votes: Some(9) }],
         }),
         reactions: vec![RenderedReaction { label: "🐦".to_owned(), count: 7 }],
         attachments: vec![RenderedAttachment {
