@@ -73,8 +73,9 @@ fn build_embed(source: Source, row: &NewModAction, ledger_id: i64, reverts: Opti
     if let Some(intent) = &row.intent {
         embed = embed.field("intent", intent.clone(), false);
     }
-    if let Some(metadata) = &row.metadata {
-        embed = embed.field("details", format!("`{metadata}`"), false);
+    if let Some(metadata) = &row.metadata
+        && let Some(details) = pretty_metadata(metadata) {
+        embed = embed.field("details", details, false);
     }
     if let Some(original) = reverts {
         embed = embed.field("reverts", format!("ledger #{original}"), true);
@@ -403,6 +404,32 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModAction> {
         reverted_by: row.get(13)?,
         created_at: row.get(14)?,
     })
+}
+
+// embed fields cap at 1024 chars and a purge snapshot alone would blow it - the ledger
+// keeps the full record, the embed gets the human-sized summary
+fn pretty_metadata(raw: &str) -> Option<String> {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Some(format!("`{}`", raw.chars().take(1000).collect::<String>()));
+    };
+    let mut parts = Vec::new();
+    for (key, value) in &map {
+        match (key.as_str(), value) {
+            ("messages", _) | (_, serde_json::Value::Null) => {}
+            ("duration_minutes", v) => parts.push(format!("duration: {v} min")),
+            ("until", serde_json::Value::String(s)) => match serenity::model::timestamp::Timestamp::parse(s) {
+                Ok(t) => parts.push(format!("until <t:{}:f>", t.unix_timestamp())),
+                Err(_) => parts.push(format!("until {s}")),
+            },
+            ("count", v) => parts.push(format!("{v} messages")),
+            (k, serde_json::Value::String(s)) => parts.push(format!("{k}: {s}")),
+            (k, v) => parts.push(format!("{k}: {v}")),
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join(" · ").chars().take(1000).collect())
 }
 
 pub(crate) const SCHEMA: &str = r#"
