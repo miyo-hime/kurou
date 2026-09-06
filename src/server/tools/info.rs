@@ -37,7 +37,7 @@ impl KurouServer {
         &self,
         Parameters(ServerInfoRequest { guild_id }): Parameters<ServerInfoRequest>,
     ) -> Result<String, String> {
-        let guild = resolve_guild(guild_id, self.default_guild, &self.readonly_guilds)?;
+        let guild = resolve_guild(guild_id, self.default_guild, self.readonly_guilds())?;
         let info = self
             .client_for_guild(guild)
             .server_info(guild)
@@ -55,7 +55,7 @@ impl KurouServer {
             .default_guild
             .iter()
             .map(|g| (*g, "primary"))
-            .chain(self.readonly_guilds.iter().map(|g| (*g, "readonly")));
+            .chain(self.readonly_guilds().iter().map(|g| (*g, "readonly")));
         let mut entries: Vec<ServerEntry> = Vec::new();
         for (guild, role) in targets {
             let info = self.client_for_guild(guild).server_info(guild).await.ok();

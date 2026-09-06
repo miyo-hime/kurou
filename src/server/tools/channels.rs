@@ -40,7 +40,7 @@ impl KurouServer {
         &self,
         Parameters(ListChannelsRequest { guild_id, kinds }): Parameters<ListChannelsRequest>,
     ) -> Result<String, String> {
-        let guild = resolve_guild(guild_id, self.default_guild, &self.readonly_guilds)?;
+        let guild = resolve_guild(guild_id, self.default_guild, self.readonly_guilds())?;
         let channels = self
             .client_for_guild(guild)
             .channels(guild)
@@ -58,7 +58,7 @@ impl KurouServer {
         &self,
         Parameters(ListThreadsRequest { guild_id }): Parameters<ListThreadsRequest>,
     ) -> Result<String, String> {
-        let guild = resolve_guild(guild_id, self.default_guild, &self.readonly_guilds)?;
+        let guild = resolve_guild(guild_id, self.default_guild, self.readonly_guilds())?;
         let threads = self
             .client_for_guild(guild)
             .active_threads(guild)

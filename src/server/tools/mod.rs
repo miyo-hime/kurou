@@ -1,9 +1,12 @@
 pub mod archive;
 pub mod channels;
 pub mod common;
+pub mod hands;
 pub mod info;
 pub mod mentions;
 pub mod messages;
+pub mod modlog;
+pub mod raid;
 pub mod scan;
 pub mod send;
 pub mod users;

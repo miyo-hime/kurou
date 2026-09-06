@@ -83,7 +83,7 @@ impl KurouServer {
     // the mouth's gate: when read-only secondaries exist, send_message may only land in
     // the primary guild. resolve the channel's guild and refuse anything else.
     async fn guard_send_target(&self, channel: serenity::model::id::ChannelId) -> Result<(), String> {
-        if self.readonly_guilds.is_empty() {
+        if self.readonly_guilds().is_empty() {
             return Ok(());
         }
         let primary = self

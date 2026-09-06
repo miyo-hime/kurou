@@ -27,6 +27,7 @@ impl Ledger {
             conn.pragma_update(None, "journal_mode", "wal").context("set wal mode")?;
             conn.execute_batch(crate::mentions::SCHEMA).context("mentions schema")?;
             conn.execute_batch(crate::layout::SCHEMA).context("layout schema")?;
+            conn.execute_batch(crate::modlog::SCHEMA).context("modlog schema")?;
 
             // dbs from the turso era predate msg_fts, so a fresh index backfills from
             // the existing rows. rebuild on an empty table is free, so first boot is too.
@@ -64,6 +65,10 @@ impl Ledger {
 
     pub fn archive(&self) -> crate::archive::MessageStore {
         crate::archive::MessageStore::new(self.path.clone())
+    }
+
+    pub fn modlog(&self) -> crate::modlog::ModlogStore {
+        crate::modlog::ModlogStore::new(self.path.clone())
     }
 }
 

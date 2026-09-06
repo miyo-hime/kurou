@@ -33,48 +33,61 @@ use crate::discord::DiscordClient;
 use crate::gateway::GatewayConfig;
 use crate::ledger::Ledger;
 use crate::mentions::MentionStore;
+use crate::modlog::ModlogStore;
 use crate::uploads::UploadStore;
 use crate::wall::event::{EnrichCache, WallFanout, WallMessage};
 use crate::wall::{ClientPool, WallState};
 
+// the observer bot and the guilds it owns, bundled because they share a boot-time
+// invariant: secondaries exist iff the observer does.
+#[derive(Clone, Debug)]
+pub(crate) struct Observer {
+    pub(crate) client: DiscordClient,
+    pub(crate) guilds: Vec<GuildId>,
+}
+
 #[derive(Clone, Debug)]
 pub struct KurouServer {
     pub(crate) client: DiscordClient,
-    pub(crate) readonly_client: Option<DiscordClient>,
+    pub(crate) observer: Option<Observer>,
     pub(crate) default_guild: Option<GuildId>,
-    pub(crate) readonly_guilds: Vec<GuildId>,
     pub(crate) mention_store: Option<MentionStore>,
     pub(crate) message_store: Option<MessageStore>,
+    pub(crate) modlog_store: Option<ModlogStore>,
     pub(crate) upload_store: UploadStore,
     pub(crate) senders: Arc<HashMap<String, DiscordClient>>,
     tool_router: ToolRouter<Self>,
 }
 
 impl KurouServer {
-    // ※ at clippy's arity ceiling - next field bundles readonly_client + readonly_guilds
-    // into one Observer struct (they're already coupled by a boot-time invariant)
+    // ※ at clippy's arity ceiling - next field bundles the ledger tenants
+    // (mention/message/modlog stores) into one struct
     #[expect(clippy::too_many_arguments)]
     pub fn new(
         client: DiscordClient,
-        readonly_client: Option<DiscordClient>,
+        observer: Option<Observer>,
         default_guild: Option<GuildId>,
-        readonly_guilds: Vec<GuildId>,
         mention_store: Option<MentionStore>,
         message_store: Option<MessageStore>,
+        modlog_store: Option<ModlogStore>,
         upload_store: UploadStore,
         senders: Arc<HashMap<String, DiscordClient>>,
     ) -> Self {
         Self {
             client,
-            readonly_client,
+            observer,
             default_guild,
-            readonly_guilds,
             mention_store,
             message_store,
+            modlog_store,
             upload_store,
             senders,
             tool_router: Self::tool_router(),
         }
+    }
+
+    pub(crate) fn readonly_guilds(&self) -> &[GuildId] {
+        self.observer.as_ref().map(|observer| observer.guilds.as_slice()).unwrap_or(&[])
     }
 
     // the mouth belongs to whoever's asking: koma speaks with the primary bot, a sister
@@ -93,8 +106,8 @@ impl KurouServer {
 
     // guild is known: primary token for the primary guild, observer for a secondary.
     pub(crate) fn client_for_guild(&self, guild: GuildId) -> &DiscordClient {
-        match &self.readonly_client {
-            Some(observer) if Some(guild) != self.default_guild => observer,
+        match &self.observer {
+            Some(observer) if Some(guild) != self.default_guild => &observer.client,
             _ => &self.client,
         }
     }
@@ -105,12 +118,12 @@ impl KurouServer {
         &self,
         channel: serenity::model::id::ChannelId,
     ) -> &DiscordClient {
-        let Some(observer) = &self.readonly_client else {
+        let Some(observer) = &self.observer else {
             return &self.client;
         };
         match self.client.channel_guild(channel).await {
             Ok(guild) if guild == self.default_guild => &self.client,
-            _ => observer,
+            _ => &observer.client,
         }
     }
 
@@ -124,14 +137,17 @@ impl KurouServer {
             + tools::archive::router()
             + tools::send::router()
             + tools::users::router()
+            + tools::modlog::router()
+            + tools::hands::router()
+            + tools::raid::router()
     }
 }
 
 #[tool_handler(
     router = self.tool_router,
     name = "kurou",
-    version = "0.13.0",
-    instructions = "a small window into a discord server. crow on the wire. reads: list_servers, get_server_info, list_channels, list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). archive: search_messages (full-text search the local message archive, needs ARCHIVE=true). voice: send_message, get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. read-only secondary guilds ride a separate observer bot, routed for you. multi-identity: every caller is a labeled bearer - reads are open to all sisters, send_message speaks with the caller's own bot voice or refuses, and the mention inbox answers only to koma."
+    version = "0.14.0",
+    instructions = "a small window into a discord server. crow on the wire. reads: list_servers, get_server_info, list_channels, list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). archive: search_messages (full-text search the local message archive, needs ARCHIVE=true). voice: send_message, get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. mod ledger: check_ledger, user_history - the crow's moderation memory, every action it witnessed or performed. mod hands (primary guild only, caller's own bot, intent required, every act recorded): ban_user, unban_user, kick_user, timeout_user, untimeout_user, warn_user, revoke_warn, add_role, remove_role, set_nickname, delete_message, lock_channel, unlock_channel, set_slowmode, purge_channel, delete_invite; get_bans and list_invites are open reads. the watcher also records what other moderators do: bans, unbans, kicks, timeouts, joins and leaves land as observed ledger rows. read-only secondary guilds ride a separate observer bot, routed for you. multi-identity: every caller is a labeled bearer - reads are open to all sisters, send_message and the mod hands act with the caller's own bot voice or refuse, and the mention inbox answers only to koma."
 )]
 impl ServerHandler for KurouServer {}
 
@@ -151,8 +167,7 @@ pub async fn run_stdio(config: Config) -> Result<()> {
         .as_deref()
         .map(parse_guild_id)
         .transpose()?;
-    let readonly_guilds = read_guild_allowlist(&config, default_guild)?;
-    let readonly_client = build_readonly_client(&config, &readonly_guilds)?;
+    let observer = build_observer(&config, default_guild)?;
 
     // stdio is the local smoke path - only the mention inbox lives here; the wall and the
     // archive are http-only, so the ledger only opens when mentions are being recorded.
@@ -164,6 +179,7 @@ pub async fn run_stdio(config: Config) -> Result<()> {
         None
     };
     let mention_store = ledger.as_ref().map(Ledger::mentions);
+    let modlog_store = ledger.as_ref().map(Ledger::modlog);
 
     let gateway = crate::gateway::spawn_gateway(
         token.clone(),
@@ -173,6 +189,8 @@ pub async fn run_stdio(config: Config) -> Result<()> {
             mention_keywords: config.mention_keywords.clone(),
             mention_store: mention_store.clone(),
             archive: None,
+            modlog: modlog_store.clone(),
+            crow_bot_ids: Vec::new(),
             fanout: None,
             broadcast_guilds: Vec::new(),
         },
@@ -182,11 +200,11 @@ pub async fn run_stdio(config: Config) -> Result<()> {
     let upload_store = UploadStore::new(UPLOAD_TTL);
     let service = KurouServer::new(
         client,
-        readonly_client,
+        observer,
         default_guild,
-        readonly_guilds,
         mention_store,
         None,
+        modlog_store,
         upload_store,
         Arc::default(),
     )
@@ -212,8 +230,7 @@ pub async fn run_http(config: Config) -> Result<()> {
         .as_deref()
         .map(parse_guild_id)
         .transpose()?;
-    let readonly_guilds = read_guild_allowlist(&config, default_guild)?;
-    let readonly_client = build_readonly_client(&config, &readonly_guilds)?;
+    let observer = build_observer(&config, default_guild)?;
     let bind_addr: std::net::SocketAddr = (config.host, config.port).into();
 
     // one ledger for the whole crow. it opens when any tenant is live: the mention inbox,
@@ -234,6 +251,7 @@ pub async fn run_http(config: Config) -> Result<()> {
         .archive
         .then(|| ledger.as_ref().map(Ledger::archive))
         .flatten();
+    let modlog_store = ledger.as_ref().map(Ledger::modlog);
 
     // the wall's plumbing: one enrichment cache shared by every gateway and the backfill
     // path, one broadcast both gateways pour into and every browser drinks from.
@@ -247,6 +265,25 @@ pub async fn run_http(config: Config) -> Result<()> {
         tx: wall_tx.clone(),
     });
 
+    let senders: Arc<HashMap<String, DiscordClient>> = Arc::new(
+        crate::config::sender_tokens()
+            .into_iter()
+            .map(|(label, sender_token)| (label, DiscordClient::new(&sender_token)))
+            .collect(),
+    );
+    if !senders.is_empty() {
+        tracing::info!(voices = ?senders.keys().collect::<Vec<_>>(), "per-sister bot voices configured");
+    }
+    // the watcher needs to know the crow's own hands by their bot ids, or a crow-issued
+    // ban would land twice: once with intent, once as a hollow observed echo.
+    let mut crow_bot_ids = Vec::new();
+    for (label, sender) in senders.iter() {
+        match sender.current_user_id().await {
+            Ok(id) => crow_bot_ids.push(id),
+            Err(error) => tracing::warn!(label, error = format!("{error:#}"), "could not resolve sender bot id; its mod actions may double-record"),
+        }
+    }
+
     let gateway = crate::gateway::spawn_gateway(
         token.clone(),
         GatewayConfig {
@@ -255,6 +292,8 @@ pub async fn run_http(config: Config) -> Result<()> {
             mention_keywords: config.mention_keywords.clone(),
             mention_store: mention_store.clone(),
             archive: archive_store.clone(),
+            modlog: modlog_store.clone(),
+            crow_bot_ids,
             fanout: primary_fanout,
             broadcast_guilds: default_guild.into_iter().collect(),
         },
@@ -270,21 +309,24 @@ pub async fn run_http(config: Config) -> Result<()> {
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string);
-    let observer_gateway = match (observe_secondaries, observer_token, &readonly_client) {
-        (true, Some(observer_token), Some(observer_client)) => crate::gateway::spawn_gateway(
+    let observer_gateway = match (observe_secondaries, observer_token, &observer) {
+        (true, Some(observer_token), Some(observer)) => crate::gateway::spawn_gateway(
             observer_token,
             GatewayConfig {
                 mode: GatewayMode::Presence,
                 default_guild: None,
                 mention_keywords: Vec::new(),
                 mention_store: None,
+                // the observer never writes the modlog - moderation is primary-guild only
+                modlog: None,
+                crow_bot_ids: Vec::new(),
                 archive: archive_store.clone(),
                 fanout: wall_enabled.then(|| WallFanout {
-                    client: observer_client.clone(),
+                    client: observer.client.clone(),
                     cache: enrich_cache.clone(),
                     tx: wall_tx.clone(),
                 }),
-                broadcast_guilds: readonly_guilds.clone(),
+                broadcast_guilds: observer.guilds.clone(),
             },
         ),
         _ => None,
@@ -301,9 +343,9 @@ pub async fn run_http(config: Config) -> Result<()> {
             cache: enrich_cache.clone(),
             pool: ClientPool {
                 client: DiscordClient::new(&token),
-                readonly_client: readonly_client.clone(),
+                readonly_client: observer.as_ref().map(|observer| observer.client.clone()),
                 default_guild,
-                readonly_guilds: readonly_guilds.clone(),
+                readonly_guilds: observer.as_ref().map(|observer| observer.guilds.clone()).unwrap_or_default(),
             },
             layout,
         })
@@ -319,14 +361,13 @@ pub async fn run_http(config: Config) -> Result<()> {
     ));
     let cancellation = CancellationToken::new();
 
-    let senders: Arc<HashMap<String, DiscordClient>> = Arc::new(
-        crate::config::sender_tokens()
-            .into_iter()
-            .map(|(label, sender_token)| (label, DiscordClient::new(&sender_token)))
-            .collect(),
-    );
-    if !senders.is_empty() {
-        tracing::info!(voices = ?senders.keys().collect::<Vec<_>>(), "per-sister bot voices configured");
+    // the tempban timer only runs where the daemon lives - stdio sessions are too
+    // short-lived to be trusted with an expiry.
+    let scheduler = modlog_store
+        .clone()
+        .map(|modlog| crate::scheduler::spawn_scheduler(DiscordClient::new(&token), modlog));
+    if scheduler.is_some() {
+        tracing::info!("tempban scheduler ticking");
     }
 
     let upload_store = UploadStore::new(UPLOAD_TTL);
@@ -335,20 +376,20 @@ pub async fn run_http(config: Config) -> Result<()> {
         .with_allowed_origins(allowed_origins.clone())
         .with_cancellation_token(cancellation.child_token());
     let factory_store = upload_store.clone();
-    let factory_readonly = readonly_guilds.clone();
-    let factory_readonly_client = readonly_client.clone();
+    let factory_observer = observer.clone();
     let factory_message = archive_store.clone();
+    let factory_modlog = modlog_store.clone();
     let factory_senders = senders.clone();
     let service: StreamableHttpService<KurouServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
                 Ok(KurouServer::new(
                     DiscordClient::new(&token),
-                    factory_readonly_client.clone(),
+                    factory_observer.clone(),
                     default_guild,
-                    factory_readonly.clone(),
                     mention_store.clone(),
                     factory_message.clone(),
+                    factory_modlog.clone(),
                     factory_store.clone(),
                     factory_senders.clone(),
                 ))
@@ -457,6 +498,9 @@ pub async fn run_http(config: Config) -> Result<()> {
     if let Some(observer_gateway) = observer_gateway {
         observer_gateway.abort();
     }
+    if let Some(scheduler) = scheduler {
+        scheduler.abort();
+    }
 
     Ok(())
 }
@@ -469,7 +513,7 @@ fn parse_guild_id(raw: &str) -> Result<GuildId> {
     Ok(GuildId::new(id))
 }
 
-fn read_guild_allowlist(config: &Config, default_guild: Option<GuildId>) -> Result<Vec<GuildId>> {
+fn build_observer(config: &Config, default_guild: Option<GuildId>) -> Result<Option<Observer>> {
     let guilds = config
         .readonly_guilds
         .iter()
@@ -481,25 +525,19 @@ fn read_guild_allowlist(config: &Config, default_guild: Option<GuildId>) -> Resu
                 .with_context(|| format!("READONLY_GUILDS '{raw}' is not a valid snowflake"))
         })
         .collect::<Result<Vec<_>>>()?;
-    if !guilds.is_empty() && default_guild.is_none() {
+    if guilds.is_empty() {
+        return Ok(None);
+    }
+    if default_guild.is_none() {
         anyhow::bail!("READONLY_GUILDS is set but DISCORD_GUILD_ID (the primary, the only place send_message may post) is not");
     }
-    Ok(guilds)
-}
-
-fn build_readonly_client(config: &Config, readonly_guilds: &[GuildId]) -> Result<Option<DiscordClient>> {
     let token = config
         .readonly_discord_token
         .as_deref()
         .map(str::trim)
-        .filter(|t| !t.is_empty());
-    match (readonly_guilds.is_empty(), token) {
-        (true, _) => Ok(None),
-        (false, Some(token)) => Ok(Some(DiscordClient::new(token))),
-        (false, None) => {
-            anyhow::bail!("READONLY_GUILDS is set but READONLY_DISCORD_TOKEN (the observer bot) is not")
-        }
-    }
+        .filter(|t| !t.is_empty())
+        .context("READONLY_GUILDS is set but READONLY_DISCORD_TOKEN (the observer bot) is not")?;
+    Ok(Some(Observer { client: DiscordClient::new(token), guilds }))
 }
 
 fn allowed_hosts(config: &Config) -> Vec<String> {
@@ -524,7 +562,7 @@ mod tests {
     use crate::uploads::UploadStore;
 
     fn server(senders: HashMap<String, DiscordClient>) -> KurouServer {
-        KurouServer::new(DiscordClient::new("koma-token"), None, None, Vec::new(), None, None, UploadStore::new(UPLOAD_TTL), Arc::new(senders))
+        KurouServer::new(DiscordClient::new("koma-token"), None, None, None, None, None, UploadStore::new(UPLOAD_TTL), Arc::new(senders))
     }
 
     #[test]
