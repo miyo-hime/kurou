@@ -172,7 +172,7 @@ impl KurouServer {
         row.metadata = Some(serde_json::json!({ "count": snapshot.len(), "messages": snapshot, "partial_error": failure }).to_string());
         let ledger_id = hand.record(row).await?;
         match failure {
-            Some(error) => Err(format!("purge was PARTIAL - {deleted} of {} deleted, snapshot kept in ledger row {ledger_id}: {error}", snapshot.len())),
+            Some(error) => Err(format!("purge was PARTIAL - {deleted} of {} confirmed deleted (a failed call may still have landed, so the real count could be higher), snapshot kept in ledger row {ledger_id}: {error}", snapshot.len())),
             None => json_text(&serde_json::json!({ "purged": deleted, "channel": channel.to_string(), "ledger_id": ledger_id })),
         }
     }
@@ -258,12 +258,17 @@ impl KurouServer {
         let (mut allow, mut deny) = existing.map(|o| (o.allow, o.deny)).unwrap_or((Permissions::empty(), Permissions::empty()));
 
         let allow_had_send = allow.contains(Permissions::SEND_MESSAGES);
-        let open_lock = if lock {
-            None
-        } else {
-            let filter = crate::modlog::ModlogFilter { action: Some("lock".to_string()), channel_id: Some(channel.to_string()), ..Default::default() };
-            hand.modlog.query(filter, 1).await.map_err(tool_error)?.into_iter().next().filter(|row| row.reverted_by.is_none())
-        };
+        let filter = crate::modlog::ModlogFilter { action: Some("lock".to_string()), channel_id: Some(channel.to_string()), ..Default::default() };
+        let open_lock = hand.modlog.query(filter, 25).await.map_err(tool_error)?.into_iter().find(|row| row.reverted_by.is_none());
+
+        // one open lock per channel, ever: lock twice and the second row would remember
+        // the already-stripped allow bit as the state to restore
+        if lock && let Some(open) = &open_lock {
+            return Err(format!("channel {channel} is already locked (open ledger row {}); unlock it first", open.id));
+        }
+        if !lock && open_lock.is_none() {
+            return Err(format!("no open lock row for channel {channel} - the crow only unlocks what it locked. a standing deny (a read-only channel) is not a lock; clear that in the discord ui if you truly mean it"));
+        }
 
         if lock {
             deny |= Permissions::SEND_MESSAGES;

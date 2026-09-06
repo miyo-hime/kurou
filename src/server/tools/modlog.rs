@@ -74,6 +74,6 @@ impl KurouServer {
     pub(crate) fn modlog(&self) -> Result<&crate::modlog::ModlogStore, String> {
         self.modlog_store
             .as_ref()
-            .ok_or_else(|| "the mod ledger is closed: no ledger is open (enable ARCHIVE, WALL or GATEWAY_MODE=mentions)".to_string())
+            .ok_or_else(|| "the mod ledger is closed: set MODLOG=true to arm the moderation layer".to_string())
     }
 }

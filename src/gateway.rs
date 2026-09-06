@@ -129,8 +129,9 @@ struct Attribution {
     entry: Option<serenity::model::guild::audit_log::AuditLogEntry>,
 }
 
-// finds the freshest audit entry for a target, or nothing - "nothing" is a real answer
-// (a plain leave has no kick entry), so this one never complains about it.
+// finds the freshest audit entry for a target. Ok(None) means the log was readable and
+// held no entry - a real answer (a plain leave has no kick entry). Err(()) means every
+// fetch failed, which is NOT "no entry" and must never classify anything.
 async fn find_attribution(
     ctx: &Context,
     guild_id: GuildId,
@@ -138,11 +139,15 @@ async fn find_attribution(
     target: UserId,
     delays_ms: &[u64],
     max_age_secs: i64,
-) -> Option<Attribution> {
+) -> Result<Option<Attribution>, ()> {
+    let mut any_fetch_succeeded = false;
     for delay_ms in delays_ms {
         tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
         let logs = match guild_id.audit_logs(&ctx.http, Some(action), None, None, Some(10)).await {
-            Ok(logs) => logs,
+            Ok(logs) => {
+                any_fetch_succeeded = true;
+                logs
+            }
             Err(error) => {
                 // a transient failure spends one attempt, not the whole hunt
                 tracing::warn!(error = format!("{error:#}"), %guild_id, "audit log fetch failed");
@@ -160,15 +165,15 @@ async fn find_attribution(
                 && now - entry.id.created_at().unix_timestamp() < max_age_secs
         });
         if let Some(entry) = entry {
-            return Some(Attribution {
+            return Ok(Some(Attribution {
                 executor_id: Some(entry.user_id.to_string()),
                 executor_name: ctx.http.get_user(entry.user_id).await.ok().map(|user| user.name),
                 reason: entry.reason.clone(),
                 entry: Some(entry),
-            });
+            }));
         }
     }
-    None
+    if any_fetch_succeeded { Ok(None) } else { Err(()) }
 }
 
 async fn attribute(
@@ -178,10 +183,10 @@ async fn attribute(
     target: UserId,
 ) -> Attribution {
     match find_attribution(ctx, guild_id, action, target, &[500, 1500, 3000], 300).await {
-        Some(attribution) => attribution,
-        None => {
-            tracing::warn!(%guild_id, %target, "no matching audit entry after retries; recording unattributed");
-            Attribution { executor_id: None, executor_name: None, reason: None, entry: None }
+        Ok(Some(attribution)) => attribution,
+        Ok(None) | Err(()) => {
+            tracing::warn!(%guild_id, %target, "no usable audit entry after retries; recording unattributed");
+            Attribution::nobody()
         }
     }
 }
@@ -193,9 +198,9 @@ impl Attribution {
 }
 
 impl Handler {
-    async fn record_observed(&self, action: &str, guild_id: GuildId, target: &serenity::model::user::User, attribution: Attribution, metadata: Option<String>) {
+    async fn record_observed(&self, action: &str, guild_id: GuildId, target: &serenity::model::user::User, attribution: Attribution, metadata: Option<String>) -> bool {
         let Some(modlog) = &self.modlog else {
-            return;
+            return false;
         };
         let row = NewModAction {
             action: action.to_string(),
@@ -208,9 +213,28 @@ impl Handler {
             metadata,
             ..Default::default()
         };
+        // an observed unban retires the crow tempban it undoes, or a later re-ban would
+        // get lifted by the scheduler honoring the stale expiry
+        if action == "unban"
+            && let Ok(Some(ban_id)) = modlog.latest_unreverted("ban", &target.id.to_string()).await
+        {
+            match modlog.revert(ban_id, "ban", Source::Observed, row.clone()).await {
+                Ok(_) => {
+                    tracing::info!(target = %target.id, ban_id, "observed unban retired the open ban row");
+                    return true;
+                }
+                Err(error) => tracing::warn!(error = format!("{error:#}"), ban_id, "could not retire open ban; recording standalone unban"),
+            }
+        }
         match modlog.record(Source::Observed, row).await {
-            Ok(_) => tracing::info!(action, target = %target.id, %guild_id, "recorded observed mod action"),
-            Err(error) => tracing::error!(error = format!("{error:#}"), action, target = %target.id, "failed to record observed mod action"),
+            Ok(_) => {
+                tracing::info!(action, target = %target.id, %guild_id, "recorded observed mod action");
+                true
+            }
+            Err(error) => {
+                tracing::error!(error = format!("{error:#}"), action, target = %target.id, "failed to record observed mod action");
+                false
+            }
         }
     }
 
@@ -219,15 +243,16 @@ impl Handler {
     }
 
     fn already_recorded(&self, entry_id: u64) -> bool {
+        self.seen_audit_entries.lock().expect("seen-entries lock poisoned").contains(&entry_id)
+    }
+
+    // marked only after the ledger write lands, so a failed write stays retryable
+    fn mark_recorded(&self, entry_id: u64) {
         let mut seen = self.seen_audit_entries.lock().expect("seen-entries lock poisoned");
-        if seen.contains(&entry_id) {
-            return true;
-        }
         seen.push_back(entry_id);
         if seen.len() > 128 {
             seen.pop_front();
         }
-        false
     }
 
     fn is_crow_executor(&self, attribution: &Attribution) -> bool {
@@ -292,20 +317,30 @@ impl EventHandler for Handler {
             return;
         }
         use serenity::model::guild::audit_log::{Action, MemberAction};
-        // the remove event can't tell a kick from a walk-out - only the audit log can
-        if let Some(attribution) = find_attribution(&ctx, guild_id, Action::Member(MemberAction::Kick), user.id, &[1000, 2500], 30).await {
-            if self.is_crow_executor(&attribution) {
-                tracing::debug!(target = %user.id, "skipping observed kick: crow-issued, the hand already wrote it");
-                return;
+        // the remove event can't tell a kick from a walk-out - only the audit log can,
+        // and an unreadable audit log means no classification at all, never "leave"
+        match find_attribution(&ctx, guild_id, Action::Member(MemberAction::Kick), user.id, &[1000, 2500], 30).await {
+            Err(()) => {
+                tracing::warn!(target = %user.id, "audit log unreadable; member removal left unrecorded");
             }
-            self.record_observed("kick", guild_id, &user, attribution, None).await;
-            return;
+            Ok(Some(attribution)) => {
+                if self.is_crow_executor(&attribution) {
+                    tracing::debug!(target = %user.id, "skipping observed kick: crow-issued, the hand already wrote it");
+                    return;
+                }
+                self.record_observed("kick", guild_id, &user, attribution, None).await;
+            }
+            // a ban fires this event too, and the ban handler owns that story
+            Ok(None) => match find_attribution(&ctx, guild_id, Action::Member(MemberAction::BanAdd), user.id, &[100], 30).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    self.record_observed("leave", guild_id, &user, Attribution::nobody(), None).await;
+                }
+                Err(()) => {
+                    tracing::warn!(target = %user.id, "audit log unreadable; member removal left unrecorded");
+                }
+            },
         }
-        // a ban fires this event too, and the ban handler owns that story
-        if find_attribution(&ctx, guild_id, Action::Member(MemberAction::BanAdd), user.id, &[100], 30).await.is_some() {
-            return;
-        }
-        self.record_observed("leave", guild_id, &user, Attribution::nobody(), None).await;
     }
 
     async fn guild_member_update(&self, ctx: Context, _old: Option<serenity::model::guild::Member>, _new: Option<serenity::model::guild::Member>, event: serenity::model::event::GuildMemberUpdateEvent) {
@@ -321,7 +356,7 @@ impl EventHandler for Handler {
         // communication_disabled_until is what makes this one a timeout
         let timed_out = event.communication_disabled_until.is_some_and(|until| until.unix_timestamp() > now);
         let delays: &[u64] = if timed_out { &[500, 1500] } else { &[500] };
-        let Some(attribution) = find_attribution(&ctx, event.guild_id, Action::Member(MemberAction::Update), event.user.id, delays, 30).await else {
+        let Ok(Some(attribution)) = find_attribution(&ctx, event.guild_id, Action::Member(MemberAction::Update), event.user.id, delays, 30).await else {
             return;
         };
         let new_until = attribution.entry.as_ref().and_then(|entry| {
@@ -337,15 +372,19 @@ impl EventHandler for Handler {
             tracing::debug!(target = %event.user.id, "skipping observed timeout change: crow-issued, the hand already wrote it");
             return;
         }
-        if attribution.entry.as_ref().is_some_and(|entry| self.already_recorded(entry.id.get())) {
+        let entry_id = attribution.entry.as_ref().map(|entry| entry.id.get());
+        if entry_id.is_some_and(|id| self.already_recorded(id)) {
             return;
         }
-        match new_until {
+        let recorded = match new_until {
             Some(until) if until.unix_timestamp() > now => {
                 let metadata = serde_json::json!({ "until": until.to_string() }).to_string();
-                self.record_observed("timeout", event.guild_id, &event.user, attribution, Some(metadata)).await;
+                self.record_observed("timeout", event.guild_id, &event.user, attribution, Some(metadata)).await
             }
             _ => self.record_observed("timeout_remove", event.guild_id, &event.user, attribution, None).await,
+        };
+        if recorded && let Some(id) = entry_id {
+            self.mark_recorded(id);
         }
     }
 

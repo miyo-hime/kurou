@@ -234,17 +234,21 @@ impl KurouServer {
         let hand = self.hand(&extensions, &intent)?;
         let target = parse_user(&user_id)?;
         let target_user = hand.client.user(target).await.map_err(tool_error)?;
+        // the open ban is looked up BEFORE the unban lands, so a re-ban racing in
+        // after the REST call can never be the row this unban links to
+        let open_ban = hand.modlog.latest_unreverted("ban", &target.to_string()).await.map_err(tool_error)?;
         hand.client.unban(hand.guild, target, reason.as_deref()).await.map_err(tool_error)?;
         let mut row = hand.row("unban", intent).await;
         row.target_id = Some(target.to_string());
         row.target_name = Some(target_user.name.clone());
         row.reason = reason;
-        // a manual unban retires the ban it undoes - otherwise a tempban row stays
-        // pending and the scheduler double-reverses it at expiry
-        let open_ban = hand.modlog.latest_unreverted("ban", &target.to_string()).await.map_err(tool_error)?;
         let ledger_id = match open_ban {
-            Some(ban_id) => hand.modlog.revert(ban_id, "ban", Source::Crow, row).await
-                .map_err(|error| format!("the unban WENT THROUGH but the ledger write failed - record it by hand: {error:#}"))?,
+            Some(ban_id) => match hand.modlog.revert(ban_id, "ban", Source::Crow, row.clone()).await {
+                Ok(id) => id,
+                // the scheduler got there first - its reversal stands, ours records standalone
+                Err(error) if error.to_string().contains("already reverted") => hand.record(row).await?,
+                Err(error) => return Err(format!("the unban WENT THROUGH but the ledger write failed - record it by hand: {error:#}")),
+            },
             None => hand.record(row).await?,
         };
         json_text(&serde_json::json!({ "unbanned": target_user.name, "ledger_id": ledger_id, "retired_ban": open_ban }))
@@ -309,15 +313,18 @@ impl KurouServer {
     ) -> Result<String, String> {
         let hand = self.hand(&extensions, &intent)?;
         let target = parse_user(&user_id)?;
+        let open_timeout = hand.modlog.latest_unreverted("timeout", &target.to_string()).await.map_err(tool_error)?;
         let member = hand.client.untimeout(hand.guild, target, reason.as_deref()).await.map_err(tool_error)?;
         let mut row = hand.row("timeout_remove", intent).await;
         row.target_id = Some(target.to_string());
         row.target_name = Some(member.user.name.clone());
         row.reason = reason;
-        let open_timeout = hand.modlog.latest_unreverted("timeout", &target.to_string()).await.map_err(tool_error)?;
         let ledger_id = match open_timeout {
-            Some(timeout_id) => hand.modlog.revert(timeout_id, "timeout", Source::Crow, row).await
-                .map_err(|error| format!("the timeout lift WENT THROUGH but the ledger write failed - record it by hand: {error:#}"))?,
+            Some(timeout_id) => match hand.modlog.revert(timeout_id, "timeout", Source::Crow, row.clone()).await {
+                Ok(id) => id,
+                Err(error) if error.to_string().contains("already reverted") => hand.record(row).await?,
+                Err(error) => return Err(format!("the timeout lift WENT THROUGH but the ledger write failed - record it by hand: {error:#}")),
+            },
             None => hand.record(row).await?,
         };
         json_text(&serde_json::json!({ "timeout_lifted": member.user.name, "ledger_id": ledger_id, "retired_timeout": open_timeout }))
