@@ -1,5 +1,6 @@
 mod tools;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use std::time::Duration;
@@ -45,10 +46,14 @@ pub struct KurouServer {
     pub(crate) mention_store: Option<MentionStore>,
     pub(crate) message_store: Option<MessageStore>,
     pub(crate) upload_store: UploadStore,
+    pub(crate) senders: Arc<HashMap<String, DiscordClient>>,
     tool_router: ToolRouter<Self>,
 }
 
 impl KurouServer {
+    // ※ at clippy's arity ceiling - next field bundles readonly_client + readonly_guilds
+    // into one Observer struct (they're already coupled by a boot-time invariant)
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         client: DiscordClient,
         readonly_client: Option<DiscordClient>,
@@ -57,6 +62,7 @@ impl KurouServer {
         mention_store: Option<MentionStore>,
         message_store: Option<MessageStore>,
         upload_store: UploadStore,
+        senders: Arc<HashMap<String, DiscordClient>>,
     ) -> Self {
         Self {
             client,
@@ -66,8 +72,23 @@ impl KurouServer {
             mention_store,
             message_store,
             upload_store,
+            senders,
             tool_router: Self::tool_router(),
         }
+    }
+
+    // the mouth belongs to whoever's asking: koma speaks with the primary bot, a sister
+    // speaks with her own - and without one she has eyes here, not a voice.
+    pub(crate) fn sender_for(&self, identity: &str) -> Result<&DiscordClient, String> {
+        if identity == "koma" {
+            return Ok(&self.client);
+        }
+        self.senders.get(identity).ok_or_else(|| {
+            format!(
+                "'{identity}' is read-only on the crow: no DISCORD_TOKEN_{} is configured, and the crow won't speak as koma on someone else's behalf",
+                identity.to_uppercase()
+            )
+        })
     }
 
     // guild is known: primary token for the primary guild, observer for a secondary.
@@ -109,8 +130,8 @@ impl KurouServer {
 #[tool_handler(
     router = self.tool_router,
     name = "kurou",
-    version = "0.12.0",
-    instructions = "a small window into a discord server. crow on the wire. reads: list_servers, get_server_info, list_channels, list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). archive: search_messages (full-text search the local message archive, needs ARCHIVE=true). voice: send_message, get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. read-only secondary guilds ride a separate observer bot, routed for you."
+    version = "0.13.0",
+    instructions = "a small window into a discord server. crow on the wire. reads: list_servers, get_server_info, list_channels, list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). archive: search_messages (full-text search the local message archive, needs ARCHIVE=true). voice: send_message, get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. read-only secondary guilds ride a separate observer bot, routed for you. multi-identity: every caller is a labeled bearer - reads are open to all sisters, send_message speaks with the caller's own bot voice or refuses, and the mention inbox answers only to koma."
 )]
 impl ServerHandler for KurouServer {}
 
@@ -167,6 +188,7 @@ pub async fn run_stdio(config: Config) -> Result<()> {
         mention_store,
         None,
         upload_store,
+        Arc::default(),
     )
     .serve(stdio())
     .await?;
@@ -297,6 +319,16 @@ pub async fn run_http(config: Config) -> Result<()> {
     ));
     let cancellation = CancellationToken::new();
 
+    let senders: Arc<HashMap<String, DiscordClient>> = Arc::new(
+        crate::config::sender_tokens()
+            .into_iter()
+            .map(|(label, sender_token)| (label, DiscordClient::new(&sender_token)))
+            .collect(),
+    );
+    if !senders.is_empty() {
+        tracing::info!(voices = ?senders.keys().collect::<Vec<_>>(), "per-sister bot voices configured");
+    }
+
     let upload_store = UploadStore::new(UPLOAD_TTL);
     let http_config = StreamableHttpServerConfig::default()
         .with_allowed_hosts(allowed_hosts.clone())
@@ -306,6 +338,7 @@ pub async fn run_http(config: Config) -> Result<()> {
     let factory_readonly = readonly_guilds.clone();
     let factory_readonly_client = readonly_client.clone();
     let factory_message = archive_store.clone();
+    let factory_senders = senders.clone();
     let service: StreamableHttpService<KurouServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
@@ -317,6 +350,7 @@ pub async fn run_http(config: Config) -> Result<()> {
                     mention_store.clone(),
                     factory_message.clone(),
                     factory_store.clone(),
+                    factory_senders.clone(),
                 ))
             },
             Default::default(),
@@ -482,4 +516,24 @@ fn allowed_hosts(config: &Config) -> Vec<String> {
         host,
         bind_addr,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::uploads::UploadStore;
+
+    fn server(senders: HashMap<String, DiscordClient>) -> KurouServer {
+        KurouServer::new(DiscordClient::new("koma-token"), None, None, Vec::new(), None, None, UploadStore::new(UPLOAD_TTL), Arc::new(senders))
+    }
+
+    #[test]
+    fn sender_resolution_follows_token_ownership() {
+        let crow = server(HashMap::from([("mecha".to_string(), DiscordClient::new("mecha-token"))]));
+        assert!(crow.sender_for("koma").is_ok());
+        assert!(crow.sender_for("mecha").is_ok());
+        let refusal = crow.sender_for("pyonka").unwrap_err();
+        assert!(refusal.contains("read-only"));
+        assert!(refusal.contains("DISCORD_TOKEN_PYONKA"));
+    }
 }

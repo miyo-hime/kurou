@@ -10,6 +10,26 @@ pub fn tool_error(error: anyhow::Error) -> String {
     error.to_string()
 }
 
+// no http parts in the context means stdio or an authless bind - koma's own machine either way
+pub fn caller_identity(extensions: &rmcp::model::Extensions) -> String {
+    extensions
+        .get::<axum::http::request::Parts>()
+        .and_then(|parts| parts.extensions.get::<crate::auth::ClientIdentity>())
+        .map(|identity| identity.0.clone())
+        .unwrap_or_else(|| "koma".to_string())
+}
+
+#[cfg(test)]
+pub(crate) fn test_extensions(label: Option<&str>) -> rmcp::model::Extensions {
+    let mut extensions = rmcp::model::Extensions::new();
+    if let Some(label) = label {
+        let (mut parts, _) = axum::http::Request::builder().uri("/mcp").body(()).unwrap().into_parts();
+        parts.extensions.insert(crate::auth::ClientIdentity(label.to_string()));
+        extensions.insert(parts);
+    }
+    extensions
+}
+
 pub fn json_text<T: Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string_pretty(value).map_err(|error| error.to_string())
 }
@@ -64,5 +84,16 @@ pub async fn enrich_display_names(client: &DiscordClient, guild: GuildId, messag
         if let Some(display) = &looked_up[&message.author_id] {
             message.author_display = Some(display.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{caller_identity, test_extensions};
+
+    #[test]
+    fn caller_identity_reads_the_bearer_label_and_defaults_to_koma() {
+        assert_eq!(caller_identity(&test_extensions(Some("mecha"))), "mecha");
+        assert_eq!(caller_identity(&test_extensions(None)), "koma");
     }
 }

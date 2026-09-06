@@ -22,7 +22,6 @@ struct AuthToken {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct ClientIdentity(pub String);
 
 impl AuthConfig {

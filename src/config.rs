@@ -95,11 +95,46 @@ pub struct Config {
     pub mention_keywords: Vec<String>,
 }
 
+// the sisters' own voices: DISCORD_TOKEN_MECHA=... gives the caller labeled 'mecha' her own
+// bot for send_message. bare DISCORD_TOKEN stays koma's; a token for an unknown label is inert.
+pub fn sender_tokens() -> Vec<(String, String)> {
+    sender_tokens_from(std::env::vars())
+}
+
+fn sender_tokens_from(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
+    vars.filter_map(|(key, value)| {
+        let label = key.strip_prefix("DISCORD_TOKEN_")?;
+        let token = value.trim();
+        (!label.is_empty() && !token.is_empty()).then(|| (label.to_lowercase(), token.to_string()))
+    })
+    .collect()
+}
+
 impl Config {
     pub fn ledger_path(&self) -> PathBuf {
         self.ledger_path
             .clone()
             .or_else(|| std::env::var_os("MENTION_DB_PATH").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("mentions.sqlite3"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sender_tokens_from;
+
+    #[test]
+    fn sender_tokens_parse_labels_and_skip_noise() {
+        let vars = [
+            ("DISCORD_TOKEN_MECHA", "mecha-bot-token"),
+            ("DISCORD_TOKEN", "primary-stays-koma"),
+            ("READONLY_DISCORD_TOKEN", "observer"),
+            ("DISCORD_TOKEN_EMPTY", "   "),
+            ("DISCORD_TOKEN_", "labelless"),
+            ("UNRELATED", "value"),
+        ];
+        let mut senders = sender_tokens_from(vars.into_iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        senders.sort();
+        assert_eq!(senders, vec![("mecha".to_string(), "mecha-bot-token".to_string())]);
     }
 }

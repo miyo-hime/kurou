@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::discord::AttachmentSource;
 use crate::discord::types::MessageInfo;
 use crate::server::KurouServer;
-use crate::server::tools::common::{json_text, parse_channel, tool_error};
+use crate::server::tools::common::{caller_identity, json_text, parse_channel, tool_error};
 
 // discord caps a single message at 10 files. say no here rather than let it bounce.
 const MAX_ATTACHMENTS: usize = 10;
@@ -51,7 +51,7 @@ pub struct InlineAttachment {
 impl KurouServer {
     #[tool(
         name = "send_message",
-        description = "Send a message to a Discord channel, optionally with file attachments. This changes the server, so use your indoor voice."
+        description = "Send a message to a Discord channel, optionally with file attachments. The message goes out as the calling sister's own bot when she has one configured; without one, sends are refused - the crow's voice is not shared. This changes the server, so use your indoor voice."
     )]
     pub async fn send_message(
         &self,
@@ -62,15 +62,16 @@ impl KurouServer {
             attachment_refs,
             attachments_inline,
         }): Parameters<SendMessageRequest>,
+        extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
+        let sender = self.sender_for(&caller_identity(&extensions))?;
         let channel = parse_channel(&channel_id)?;
         self.guard_send_target(channel).await?;
         let attachments =
             self.resolve_attachments(attachment_urls, attachment_refs, attachments_inline)?;
         validate_content(&content, attachments.len())?;
 
-        let message = self
-            .client
+        let message = sender
             .send_message(channel, &content, attachments)
             .await
             .map_err(tool_error)?;
