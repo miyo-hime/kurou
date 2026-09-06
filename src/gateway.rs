@@ -2,8 +2,9 @@ use anyhow::{Context as _, Result};
 use serenity::async_trait;
 use serenity::client::{Client, Context, EventHandler};
 use serenity::model::channel::Message;
+use serenity::model::event::MessageUpdateEvent;
 use serenity::model::gateway::{GatewayIntents, Ready};
-use serenity::model::id::{GuildId, UserId};
+use serenity::model::id::{ChannelId, GuildId, MessageId, UserId};
 use serenity::model::user::OnlineStatus;
 use tokio::task::JoinHandle;
 
@@ -106,6 +107,44 @@ impl EventHandler for Handler {
             mode = ?self.mode,
             "discord gateway ready"
         );
+    }
+
+    async fn message_delete(&self, _ctx: Context, channel_id: ChannelId, deleted_message_id: MessageId, _guild_id: Option<GuildId>) {
+        let Some(archive) = &self.archive else {
+            return;
+        };
+        match archive.delete(deleted_message_id.get()).await {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(message_id = %deleted_message_id, channel_id = %channel_id, "ignored delete for unknown archive message"),
+            Err(error) => tracing::error!(error = format!("{error:#}"), message_id = %deleted_message_id, channel_id = %channel_id, "failed to mark archived message deleted"),
+        }
+    }
+
+    async fn message_delete_bulk(&self, _ctx: Context, channel_id: ChannelId, multiple_deleted_messages_ids: Vec<MessageId>, _guild_id: Option<GuildId>) {
+        let Some(archive) = &self.archive else {
+            return;
+        };
+        let requested = multiple_deleted_messages_ids.len();
+        let message_ids = multiple_deleted_messages_ids.into_iter().map(MessageId::get).collect();
+        match archive.delete_bulk(message_ids).await {
+            Ok(changed) if changed == requested => {}
+            Ok(changed) => tracing::debug!(changed, requested, channel_id = %channel_id, "bulk delete included unknown archive messages"),
+            Err(error) => tracing::error!(error = format!("{error:#}"), channel_id = %channel_id, "failed to mark archived messages deleted"),
+        }
+    }
+
+    async fn message_update(&self, _ctx: Context, _old_if_available: Option<Message>, _new: Option<Message>, event: MessageUpdateEvent) {
+        let Some(archive) = &self.archive else {
+            return;
+        };
+        let message_id = event.id;
+        let channel_id = event.channel_id;
+        let edited_timestamp = event.edited_timestamp.map(|timestamp| timestamp.to_string());
+        match archive.edit(message_id.get(), event.content, edited_timestamp).await {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(message_id = %message_id, channel_id = %channel_id, "ignored archive message update without changed content"),
+            Err(error) => tracing::error!(error = format!("{error:#}"), message_id = %message_id, channel_id = %channel_id, "failed to archive message edit"),
+        }
     }
 
     async fn message(&self, _ctx: Context, message: Message) {

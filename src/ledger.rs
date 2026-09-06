@@ -37,6 +37,10 @@ impl Ledger {
                 && !error.to_string().contains("duplicate column") {
                 return Err(error).context("add author_display column");
             }
+            if let Err(error) = conn.execute("alter table messages add column deleted_at text", [])
+                && !error.to_string().contains("duplicate column") {
+                return Err(error).context("add deleted_at column");
+            }
             if fresh_fts {
                 tracing::info!("building the fts index over the archive");
                 conn.execute("insert into msg_fts(msg_fts) values ('rebuild')", [])

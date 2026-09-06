@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use rusqlite::types::Value;
 use serde::Serialize;
 
@@ -67,7 +67,14 @@ pub(crate) const SCHEMA: &str = r#"
         mention_ids text not null default '',
         timestamp text not null,
         payload text not null,
-        created_at text not null default current_timestamp
+        created_at text not null default current_timestamp,
+        deleted_at text
+    );
+
+    create table if not exists message_edits (
+        message_id integer not null,
+        content text not null,
+        superseded_at text not null default current_timestamp
     );
 
     create index if not exists idx_messages_channel on messages(channel_id, message_id);
@@ -132,6 +139,82 @@ impl MessageStore {
         .context("archive insert task")?
     }
 
+    pub async fn delete(&self, message_id: u64) -> Result<bool> {
+        Ok(self.delete_bulk(vec![message_id]).await? > 0)
+    }
+
+    pub async fn delete_bulk(&self, message_ids: Vec<u64>) -> Result<usize> {
+        let snowflakes = message_ids
+            .into_iter()
+            .map(|id| i64::try_from(id).with_context(|| format!("message id '{id}' does not fit sqlite integer")))
+            .collect::<Result<Vec<_>>>()?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = crate::ledger::connect(&path).context("archive connect")?;
+            let tx = conn.transaction().context("begin message delete")?;
+            let mut changed = 0;
+            for snowflake in snowflakes {
+                changed += tx
+                    .execute(
+                        "update messages set deleted_at = current_timestamp where message_id = ?1 and deleted_at is null",
+                        [snowflake],
+                    )
+                    .context("mark message deleted")?;
+            }
+            tx.commit().context("commit message delete")?;
+            Ok(changed)
+        })
+        .await
+        .context("archive delete task")?
+    }
+
+    pub async fn edit(&self, message_id: u64, content: Option<String>, edited_timestamp: Option<String>) -> Result<bool> {
+        let Some(content) = content else {
+            return Ok(false);
+        };
+        let snowflake = i64::try_from(message_id)
+            .with_context(|| format!("message id '{message_id}' does not fit sqlite integer"))?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = crate::ledger::connect(&path).context("archive connect")?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).context("begin message edit")?;
+            let previous = tx
+                .query_row(
+                    "select content, payload from messages where message_id = ?1",
+                    [snowflake],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .context("read message before edit")?;
+            let Some((previous_content, payload)) = previous else {
+                return Ok(false);
+            };
+            if previous_content == content {
+                return Ok(false);
+            }
+
+            let mut rendered: RenderedMessage = serde_json::from_str(&payload).context("deserialize payload before edit")?;
+            rendered.content = content.clone();
+            rendered.edited_timestamp = edited_timestamp.clone();
+            let payload = serde_json::to_string(&rendered).context("serialize edited payload")?;
+
+            tx.execute(
+                "insert into message_edits (message_id, content, superseded_at) values (?1, ?2, coalesce(?3, current_timestamp))",
+                params![snowflake, previous_content, edited_timestamp],
+            )
+            .context("save previous message draft")?;
+            tx.execute(
+                "update messages set content = ?2, payload = ?3 where message_id = ?1",
+                params![snowflake, content, payload],
+            )
+            .context("update edited message")?;
+            tx.commit().context("commit message edit")?;
+            Ok(true)
+        })
+        .await
+        .context("archive edit task")?
+    }
+
     pub async fn search(&self, query: &str, limit: u8) -> Result<Vec<MessageHit>> {
         let match_query = fts_query(query)?;
         let path = self.path.clone();
@@ -140,7 +223,7 @@ impl MessageStore {
             let mut stmt = conn
                 .prepare(
                     r#"
-                    select m.message_id, m.guild_id, m.channel_id, m.author_id, m.author_name, m.author_display, m.content, m.timestamp
+                    select m.message_id, m.guild_id, m.channel_id, m.author_id, m.author_name, m.author_display, m.content, m.timestamp, m.deleted_at is not null
                     from msg_fts join messages m on m.message_id = msg_fts.rowid
                     where msg_fts match ?1
                     order by m.message_id desc
@@ -157,7 +240,7 @@ impl MessageStore {
                         author_id: row.get(3)?,
                         author_name: row.get(4)?,
                         author_display: row.get(5)?,
-                        content: row.get(6)?,
+                        content: deleted_content(row.get(6)?, row.get(8)?),
                         timestamp: row.get(7)?,
                     })
                 })
@@ -175,7 +258,7 @@ impl MessageStore {
         tokio::task::spawn_blocking(move || {
             let conn = crate::ledger::connect(&path).context("archive connect")?;
 
-            let mut sql = String::from("select payload from messages where channel_id = ?1");
+            let mut sql = String::from("select payload, deleted_at is not null from messages where channel_id = ?1");
             let mut params: Vec<Value> = vec![Value::Text(query.channel_id.clone())];
 
             if let Some(before) = query.before {
@@ -216,14 +299,20 @@ impl MessageStore {
 
             let mut stmt = conn.prepare(&sql).context("prepare scan")?;
             let payloads = stmt
-                .query_map(rusqlite::params_from_iter(params), |row| row.get::<_, String>(0))
+                .query_map(rusqlite::params_from_iter(params), |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)))
                 .context("scan messages")?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .context("read scan rows")?;
             let matches = payloads
                 .iter()
-                .map(|payload| serde_json::from_str(payload).context("deserialize payload"))
-                .collect::<Result<Vec<RenderedMessage>>>()?;
+                .map(|(payload, deleted)| {
+                    let mut rendered: RenderedMessage = serde_json::from_str(payload).context("deserialize payload")?;
+                    if *deleted {
+                        rendered.content = deleted_content(rendered.content, true);
+                    }
+                    Ok(rendered)
+                })
+                .collect::<Result<Vec<_>>>()?;
 
             let floor = conn
                 .query_row(
@@ -253,6 +342,14 @@ fn fts_query(query: &str) -> Result<String> {
 
 fn like_pattern(text: &str) -> String {
     format!("%{}%", text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))
+}
+
+fn deleted_content(content: String, deleted: bool) -> String {
+    match (deleted, content.is_empty()) {
+        (true, true) => "[deleted]".to_string(),
+        (true, false) => format!("[deleted] {content}"),
+        (false, _) => content,
+    }
 }
 
 fn mention_haystack(ids: &[String]) -> String {
@@ -290,6 +387,146 @@ mod tests {
             channel_id: "chan".to_owned(),
             mention_ids: mentions.iter().map(|id| id.to_string()).collect(),
         }
+    }
+
+    #[tokio::test]
+    async fn delete_marks_and_renders_the_archived_message() {
+        let path = std::env::temp_dir().join("kurou-archive-delete.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Ledger::open(&path).await.unwrap().archive();
+        store.insert(message(100, "koma", "a doomed draft", &[])).await.unwrap();
+
+        assert!(store.delete(100).await.unwrap());
+        assert!(!store.delete(100).await.unwrap());
+
+        let conn = crate::ledger::connect(&path).unwrap();
+        let deleted_at: Option<String> = conn
+            .query_row("select deleted_at from messages where message_id = 100", [], |row| row.get(0))
+            .unwrap();
+        assert!(deleted_at.is_some());
+        drop(conn);
+
+        let hits = store.search("doomed", 10).await.unwrap();
+        assert_eq!(hits[0].content, "[deleted] a doomed draft");
+        let scan = store.scan(ScanQuery { channel_id: "chan".into(), limit: 10, ..Default::default() }).await.unwrap();
+        assert!(crate::discord::types::render_messages(&scan.matches).contains("[deleted] a doomed draft"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_marks_every_known_row() {
+        let path = std::env::temp_dir().join("kurou-archive-bulk-delete.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Ledger::open(&path).await.unwrap().archive();
+        store.insert(message(100, "koma", "first", &[])).await.unwrap();
+        store.insert(message(200, "koma", "second", &[])).await.unwrap();
+        store.insert(message(300, "koma", "third", &[])).await.unwrap();
+
+        assert_eq!(store.delete_bulk(vec![100, 300, 999]).await.unwrap(), 2);
+        let scan = store.scan(ScanQuery { channel_id: "chan".into(), limit: 10, ..Default::default() }).await.unwrap();
+        assert_eq!(scan.matches[0].content, "[deleted] third");
+        assert_eq!(scan.matches[1].content, "second");
+        assert_eq!(scan.matches[2].content, "[deleted] first");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn edit_replaces_content_and_keeps_the_previous_draft() {
+        let path = std::env::temp_dir().join("kurou-archive-edit.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Ledger::open(&path).await.unwrap().archive();
+        store.insert(message(100, "koma", "first draft", &[])).await.unwrap();
+        let edited_at = "2026-09-06T07:00:00Z";
+
+        assert!(store.edit(100, Some("final draft".into()), Some(edited_at.into())).await.unwrap());
+        assert!(!store.edit(100, Some("final draft".into()), Some(edited_at.into())).await.unwrap());
+        assert!(store.search("first", 10).await.unwrap().is_empty());
+        assert_eq!(store.search("final", 10).await.unwrap()[0].content, "final draft");
+
+        let conn = crate::ledger::connect(&path).unwrap();
+        let (content, payload): (String, String) = conn
+            .query_row("select content, payload from messages where message_id = 100", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        assert_eq!(content, "final draft");
+        let rendered: RenderedMessage = serde_json::from_str(&payload).unwrap();
+        assert_eq!(rendered.content, "final draft");
+        assert_eq!(rendered.edited_timestamp.as_deref(), Some(edited_at));
+        let drafts: Vec<(String, String)> = conn
+            .prepare("select content, superseded_at from message_edits where message_id = 100")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(drafts, vec![("first draft".into(), edited_at.into())]);
+        drop(conn);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn contentless_update_changes_nothing() {
+        let path = std::env::temp_dir().join("kurou-archive-contentless-update.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Ledger::open(&path).await.unwrap().archive();
+        store.insert(message(100, "koma", "link with a resolving embed", &[])).await.unwrap();
+
+        assert!(!store.edit(100, None, Some("2026-09-06T07:00:00Z".into())).await.unwrap());
+        let conn = crate::ledger::connect(&path).unwrap();
+        let content: String = conn.query_row("select content from messages where message_id = 100", [], |row| row.get(0)).unwrap();
+        let edits: i64 = conn.query_row("select count(*) from message_edits", [], |row| row.get(0)).unwrap();
+        assert_eq!(content, "link with a resolving embed");
+        assert_eq!(edits, 0);
+        drop(conn);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn old_archive_schema_migrates_edits_and_deletions() {
+        let path = std::env::temp_dir().join("kurou-archive-edit-delete-migration.db");
+        let _ = std::fs::remove_file(&path);
+        let archived = message(100, "koma", "old schema", &[]).rendered;
+        let payload = serde_json::to_string(&archived).unwrap();
+        let conn = crate::ledger::connect(&path).unwrap();
+        conn.execute_batch(
+            r#"
+            create table messages (
+                message_id integer primary key,
+                guild_id text,
+                channel_id text not null,
+                author_id text not null,
+                author_name text not null,
+                author_display text,
+                content text not null,
+                mention_ids text not null default '',
+                timestamp text not null,
+                payload text not null,
+                created_at text not null default current_timestamp
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "insert into messages (message_id, guild_id, channel_id, author_id, author_name, content, timestamp, payload) values (100, 'guild', 'chan', 'koma', 'koma', 'old schema', '2026-07-01T00:00:00Z', ?1)",
+            [payload],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Ledger::open(&path).await.unwrap().archive();
+        assert!(store.edit(100, Some("new schema".into()), Some("2026-09-06T07:00:00Z".into())).await.unwrap());
+        assert!(store.delete(100).await.unwrap());
+        let conn = crate::ledger::connect(&path).unwrap();
+        let deleted_at: Option<String> = conn.query_row("select deleted_at from messages where message_id = 100", [], |row| row.get(0)).unwrap();
+        let edits: i64 = conn.query_row("select count(*) from message_edits where message_id = 100", [], |row| row.get(0)).unwrap();
+        assert!(deleted_at.is_some());
+        assert_eq!(edits, 1);
+        drop(conn);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
