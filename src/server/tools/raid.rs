@@ -6,7 +6,6 @@ use serenity::model::channel::{PermissionOverwrite, PermissionOverwriteType};
 use serenity::model::id::{MessageId, RoleId};
 use serenity::model::permissions::Permissions;
 
-use crate::modlog::Source;
 use crate::server::KurouServer;
 use crate::server::tools::common::{json_text, parse_channel, tool_error};
 
@@ -94,7 +93,7 @@ impl KurouServer {
         Parameters(SetSlowmodeRequest { channel_id, seconds, intent }): Parameters<SetSlowmodeRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        let hand = self.hand(&extensions, &intent)?;
         let channel = parse_channel(&channel_id)?;
         self.guard_primary_channel(channel).await?;
         let seconds = seconds.min(MAX_SLOWMODE_SECONDS);
@@ -102,7 +101,7 @@ impl KurouServer {
         let mut row = hand.row("slowmode", intent).await;
         row.channel_id = Some(channel.to_string());
         row.metadata = Some(serde_json::json!({ "seconds": seconds }).to_string());
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
+        let ledger_id = hand.record(row).await?;
         json_text(&serde_json::json!({ "channel": channel.to_string(), "slowmode_seconds": seconds, "ledger_id": ledger_id }))
     }
 
@@ -115,10 +114,13 @@ impl KurouServer {
         Parameters(PurgeChannelRequest { channel_id, count, intent, dry_run }): Parameters<PurgeChannelRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        let hand = self.hand(&extensions, &intent)?;
         let channel = parse_channel(&channel_id)?;
         self.guard_primary_channel(channel).await?;
-        let count = count.clamp(1, 100);
+        if count == 0 {
+            return Err("count must be 1-100; use dry_run to preview the hit list".to_string());
+        }
+        let count = count.min(100);
         let messages = hand.client.messages(channel, None, count).await.map_err(tool_error)?;
         let snapshot: Vec<_> = messages
             .iter()
@@ -138,20 +140,41 @@ impl KurouServer {
             .iter()
             .map(|message| message.id)
             .partition(|id| now - id.created_at().unix_timestamp() < BULK_DELETE_MAX_AGE_SECS);
+        // a purge that dies halfway still gets its ledger row - deleted messages with no
+        // snapshot on record would be the worst possible outcome here
+        let mut failure: Option<String> = None;
+        let mut deleted = 0usize;
         match young.len() {
             0 => {}
-            1 => hand.client.delete_message(channel, young[0], Some(&intent)).await.map_err(tool_error)?,
-            _ => hand.client.delete_messages_bulk(channel, &young, Some(&intent)).await.map_err(tool_error)?,
+            1 => match hand.client.delete_message(channel, young[0], Some(&intent)).await {
+                Ok(()) => deleted = 1,
+                Err(error) => failure = Some(format!("{error:#}")),
+            },
+            _ => match hand.client.delete_messages_bulk(channel, &young, Some(&intent)).await {
+                Ok(()) => deleted = young.len(),
+                Err(error) => failure = Some(format!("bulk delete failed (some or none of {} may be gone): {error:#}", young.len())),
+            },
         }
-        for id in &old {
-            hand.client.delete_message(channel, *id, Some(&intent)).await.map_err(tool_error)?;
+        if failure.is_none() {
+            for id in &old {
+                match hand.client.delete_message(channel, *id, Some(&intent)).await {
+                    Ok(()) => deleted += 1,
+                    Err(error) => {
+                        failure = Some(format!("{error:#}"));
+                        break;
+                    }
+                }
+            }
         }
 
         let mut row = hand.row("purge", intent).await;
         row.channel_id = Some(channel.to_string());
-        row.metadata = Some(serde_json::json!({ "count": snapshot.len(), "messages": snapshot }).to_string());
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
-        json_text(&serde_json::json!({ "purged": young.len() + old.len(), "channel": channel.to_string(), "ledger_id": ledger_id }))
+        row.metadata = Some(serde_json::json!({ "count": snapshot.len(), "messages": snapshot, "partial_error": failure }).to_string());
+        let ledger_id = hand.record(row).await?;
+        match failure {
+            Some(error) => Err(format!("purge was PARTIAL - {deleted} of {} deleted, snapshot kept in ledger row {ledger_id}: {error}", snapshot.len())),
+            None => json_text(&serde_json::json!({ "purged": deleted, "channel": channel.to_string(), "ledger_id": ledger_id })),
+        }
     }
 
     #[tool(
@@ -202,21 +225,28 @@ impl KurouServer {
         Parameters(DeleteInviteRequest { code, intent, reason }): Parameters<DeleteInviteRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
-        hand.client.delete_invite(code.trim(), reason.as_deref()).await.map_err(tool_error)?;
+        let hand = self.hand(&extensions, &intent)?;
+        // invite codes are discord-global; only codes belonging to the primary guild may die here
+        let code = code.trim().to_string();
+        let ours = self.client.invites(hand.guild).await.map_err(tool_error)?;
+        if !ours.iter().any(|invite| invite.code == code) {
+            return Err(format!("invite '{code}' is not one of the primary guild's active invites; the crow only closes its own doors"));
+        }
+        hand.client.delete_invite(&code, reason.as_deref()).await.map_err(tool_error)?;
         let mut row = hand.row("invite_delete", intent).await;
         row.reason = reason;
         row.metadata = Some(serde_json::json!({ "code": code.trim() }).to_string());
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
+        let ledger_id = hand.record(row).await?;
         json_text(&serde_json::json!({ "revoked": code.trim(), "ledger_id": ledger_id }))
     }
 }
 
 impl KurouServer {
-    // lock and unlock are the same read-modify-write on @everyone's overwrite; only the
-    // direction of the SEND_MESSAGES bit differs. other bits ride along untouched.
+    // lock and unlock are the same read-modify-write on @everyone's overwrite. the lock
+    // row remembers whether an explicit SEND allow existed (allow beats deny at the same
+    // overwrite level, so lock must clear it), and unlock restores it from that row.
     async fn set_channel_lock(&self, channel_id: &str, intent: String, lock: bool, extensions: &rmcp::model::Extensions) -> Result<String, String> {
-        let hand = self.hand(extensions)?;
+        let hand = self.hand(extensions, &intent)?;
         let channel = parse_channel(channel_id)?;
         self.guard_primary_channel(channel).await?;
         let everyone = RoleId::new(hand.guild.get());
@@ -226,11 +256,28 @@ impl KurouServer {
             .into_iter()
             .find(|overwrite| overwrite.kind == PermissionOverwriteType::Role(everyone));
         let (mut allow, mut deny) = existing.map(|o| (o.allow, o.deny)).unwrap_or((Permissions::empty(), Permissions::empty()));
+
+        let allow_had_send = allow.contains(Permissions::SEND_MESSAGES);
+        let open_lock = if lock {
+            None
+        } else {
+            let filter = crate::modlog::ModlogFilter { action: Some("lock".to_string()), channel_id: Some(channel.to_string()), ..Default::default() };
+            hand.modlog.query(filter, 1).await.map_err(tool_error)?.into_iter().next().filter(|row| row.reverted_by.is_none())
+        };
+
         if lock {
             deny |= Permissions::SEND_MESSAGES;
             allow &= !Permissions::SEND_MESSAGES;
         } else {
             deny &= !Permissions::SEND_MESSAGES;
+            let restore_allow = open_lock.as_ref()
+                .and_then(|row| row.metadata.as_deref())
+                .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+                .and_then(|value| value.get("allow_had_send").and_then(serde_json::Value::as_bool))
+                .unwrap_or(false);
+            if restore_allow {
+                allow |= Permissions::SEND_MESSAGES;
+            }
         }
         hand.client
             .set_permission_overwrite(channel, PermissionOverwrite { allow, deny, kind: PermissionOverwriteType::Role(everyone) })
@@ -239,7 +286,14 @@ impl KurouServer {
         let action = if lock { "lock" } else { "unlock" };
         let mut row = hand.row(action, intent).await;
         row.channel_id = Some(channel.to_string());
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
+        if lock {
+            row.metadata = Some(serde_json::json!({ "allow_had_send": allow_had_send }).to_string());
+        }
+        let ledger_id = match &open_lock {
+            Some(lock_row) => hand.modlog.revert(lock_row.id, "lock", crate::modlog::Source::Crow, row).await
+                .map_err(|error| format!("the unlock WENT THROUGH but the ledger write failed - record it by hand: {error:#}"))?,
+            None => hand.record(row).await?,
+        };
         json_text(&serde_json::json!({ "channel": channel.to_string(), "state": action, "ledger_id": ledger_id }))
     }
 }

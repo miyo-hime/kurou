@@ -86,6 +86,7 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         archive: config.archive,
         modlog: config.modlog,
         crow_bot_ids: config.crow_bot_ids,
+        seen_audit_entries: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         fanout: config.fanout,
         broadcast_guilds: config.broadcast_guilds,
     };
@@ -111,6 +112,10 @@ struct Handler {
     archive: Option<MessageStore>,
     modlog: Option<ModlogStore>,
     crow_bot_ids: Vec<UserId>,
+    // audit entries already turned into rows. member-update events re-surface old
+    // Update entries (a role change fires the event but writes a different audit
+    // action), so freshness alone can't stop a timeout recording twice.
+    seen_audit_entries: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<u64>>>,
     fanout: Option<WallFanout>,
     broadcast_guilds: Vec<GuildId>,
 }
@@ -139,8 +144,9 @@ async fn find_attribution(
         let logs = match guild_id.audit_logs(&ctx.http, Some(action), None, None, Some(10)).await {
             Ok(logs) => logs,
             Err(error) => {
+                // a transient failure spends one attempt, not the whole hunt
                 tracing::warn!(error = format!("{error:#}"), %guild_id, "audit log fetch failed");
-                return None;
+                continue;
             }
         };
         // stale entries must not wear a new event's face - an old ban of the same user
@@ -210,6 +216,18 @@ impl Handler {
 
     fn owns_moderation(&self, guild_id: GuildId) -> bool {
         self.modlog.is_some() && self.default_guild == Some(guild_id)
+    }
+
+    fn already_recorded(&self, entry_id: u64) -> bool {
+        let mut seen = self.seen_audit_entries.lock().expect("seen-entries lock poisoned");
+        if seen.contains(&entry_id) {
+            return true;
+        }
+        seen.push_back(entry_id);
+        if seen.len() > 128 {
+            seen.pop_front();
+        }
+        false
     }
 
     fn is_crow_executor(&self, attribution: &Attribution) -> bool {
@@ -317,6 +335,9 @@ impl EventHandler for Handler {
         };
         if self.is_crow_executor(&attribution) {
             tracing::debug!(target = %event.user.id, "skipping observed timeout change: crow-issued, the hand already wrote it");
+            return;
+        }
+        if attribution.entry.as_ref().is_some_and(|entry| self.already_recorded(entry.id.get())) {
             return;
         }
         match new_until {

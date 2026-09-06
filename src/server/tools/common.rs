@@ -10,13 +10,18 @@ pub fn tool_error(error: anyhow::Error) -> String {
     error.to_string()
 }
 
-// no http parts in the context means stdio or an authless bind - koma's own machine either way
-pub fn caller_identity(extensions: &rmcp::model::Extensions) -> String {
-    extensions
-        .get::<axum::http::request::Parts>()
-        .and_then(|parts| parts.extensions.get::<crate::auth::ClientIdentity>())
-        .map(|identity| identity.0.clone())
-        .unwrap_or_else(|| "koma".to_string())
+// no http parts at all means stdio - koma's own machine. http parts WITHOUT an identity
+// means the bearer middleware never ran (AUTH_TOKENS empty): that caller is nobody, and
+// nobody gets no name here.
+pub fn caller_identity(extensions: &rmcp::model::Extensions) -> Result<String, String> {
+    match extensions.get::<axum::http::request::Parts>() {
+        None => Ok("koma".to_string()),
+        Some(parts) => parts
+            .extensions
+            .get::<crate::auth::ClientIdentity>()
+            .map(|identity| Ok(identity.0.clone()))
+            .unwrap_or_else(|| Err("unauthenticated http callers have no identity on the crow: set AUTH_TOKENS and present a bearer".to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -27,6 +32,14 @@ pub(crate) fn test_extensions(label: Option<&str>) -> rmcp::model::Extensions {
         parts.extensions.insert(crate::auth::ClientIdentity(label.to_string()));
         extensions.insert(parts);
     }
+    extensions
+}
+
+#[cfg(test)]
+pub(crate) fn test_extensions_authless_http() -> rmcp::model::Extensions {
+    let mut extensions = rmcp::model::Extensions::new();
+    let (parts, _) = axum::http::Request::builder().uri("/mcp").body(()).unwrap().into_parts();
+    extensions.insert(parts);
     extensions
 }
 
@@ -89,11 +102,13 @@ pub async fn enrich_display_names(client: &DiscordClient, guild: GuildId, messag
 
 #[cfg(test)]
 mod tests {
-    use super::{caller_identity, test_extensions};
+    use super::{caller_identity, test_extensions, test_extensions_authless_http};
 
     #[test]
-    fn caller_identity_reads_the_bearer_label_and_defaults_to_koma() {
-        assert_eq!(caller_identity(&test_extensions(Some("mecha"))), "mecha");
-        assert_eq!(caller_identity(&test_extensions(None)), "koma");
+    fn caller_identity_reads_the_bearer_label_and_defaults_to_koma_only_on_stdio() {
+        assert_eq!(caller_identity(&test_extensions(Some("mecha"))).unwrap(), "mecha");
+        assert_eq!(caller_identity(&test_extensions(None)).unwrap(), "koma");
+        let refusal = caller_identity(&test_extensions_authless_http()).unwrap_err();
+        assert!(refusal.contains("AUTH_TOKENS"));
     }
 }

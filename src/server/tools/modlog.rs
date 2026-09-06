@@ -21,6 +21,8 @@ pub struct CheckLedgerRequest {
     pub action: Option<String>,
     #[schemars(description = "'observed' (the watcher saw another moderator act) or 'crow' (a sister acted through kurou)")]
     pub source: Option<String>,
+    #[schemars(description = "only rows in this channel (snowflake id) - purges, locks, message deletions")]
+    pub channel_id: Option<String>,
     #[schemars(description = "only rows at or after this utc time, 'YYYY-MM-DD HH:MM:SS' (a 'YYYY-MM-DD' prefix works)")]
     pub since: Option<String>,
     #[schemars(description = "only rows at or before this utc time, same format as since")]
@@ -45,9 +47,11 @@ impl KurouServer {
     )]
     pub async fn check_ledger(
         &self,
-        Parameters(CheckLedgerRequest { target_id, executor_id, action, source, since, until, limit }): Parameters<CheckLedgerRequest>,
+        Parameters(CheckLedgerRequest { target_id, executor_id, action, source, channel_id, since, until, limit }): Parameters<CheckLedgerRequest>,
     ) -> Result<String, String> {
-        let filter = ModlogFilter { target_id, executor_id, action, source, since, until };
+        // a bare date as until would sort before that day's own timestamps and exclude it
+        let until = until.map(|until| if until.len() == 10 { format!("{until} 23:59:59") } else { until });
+        let filter = ModlogFilter { target_id, executor_id, action, source, channel_id, since, until };
         let actions = self.modlog()?.query(filter, limit.unwrap_or(25).clamp(1, 100)).await.map_err(tool_error)?;
         json_text(&actions)
     }

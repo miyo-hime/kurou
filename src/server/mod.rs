@@ -169,17 +169,19 @@ pub async fn run_stdio(config: Config) -> Result<()> {
         .transpose()?;
     let observer = build_observer(&config, default_guild)?;
 
-    // stdio is the local smoke path - only the mention inbox lives here; the wall and the
-    // archive are http-only, so the ledger only opens when mentions are being recorded.
-    let ledger = if config.gateway_mode == GatewayMode::Mentions {
+    // stdio is the local smoke path - the wall and the archive are http-only, so the
+    // ledger only opens for the mention inbox or the mod layer.
+    let ledger = if config.gateway_mode == GatewayMode::Mentions || config.modlog {
         let ledger = Ledger::open(&config.ledger_path()).await?;
         tracing::info!(path = %config.ledger_path().display(), "ledger opened");
         Some(ledger)
     } else {
         None
     };
-    let mention_store = ledger.as_ref().map(Ledger::mentions);
-    let modlog_store = ledger.as_ref().map(Ledger::modlog);
+    let mention_store = (config.gateway_mode == GatewayMode::Mentions)
+        .then(|| ledger.as_ref().map(Ledger::mentions))
+        .flatten();
+    let modlog_store = config.modlog.then(|| ledger.as_ref().map(Ledger::modlog)).flatten();
 
     let gateway = crate::gateway::spawn_gateway(
         token.clone(),
@@ -197,6 +199,11 @@ pub async fn run_stdio(config: Config) -> Result<()> {
     );
 
     let client = DiscordClient::new(&token);
+    // stdio sessions are short-lived, but a ticking scheduler still beats a tempban
+    // nobody is timing; the http daemon drains anything this one misses.
+    let scheduler = modlog_store
+        .clone()
+        .map(|modlog| crate::scheduler::spawn_scheduler(client.clone(), modlog));
     let upload_store = UploadStore::new(UPLOAD_TTL);
     let service = KurouServer::new(
         client,
@@ -214,6 +221,9 @@ pub async fn run_stdio(config: Config) -> Result<()> {
     service.waiting().await?;
     if let Some(gateway) = gateway {
         gateway.abort();
+    }
+    if let Some(scheduler) = scheduler {
+        scheduler.abort();
     }
     Ok(())
 }
@@ -236,7 +246,7 @@ pub async fn run_http(config: Config) -> Result<()> {
     // one ledger for the whole crow. it opens when any tenant is live: the mention inbox,
     // the wall's saved layout, or the archive. each store draws off the shared handle.
     let needs_ledger =
-        config.wall || config.archive || config.gateway_mode == GatewayMode::Mentions;
+        config.wall || config.archive || config.modlog || config.gateway_mode == GatewayMode::Mentions;
     let ledger = if needs_ledger {
         let ledger = Ledger::open(&config.ledger_path()).await?;
         tracing::info!(path = %config.ledger_path().display(), "ledger opened");
@@ -251,7 +261,7 @@ pub async fn run_http(config: Config) -> Result<()> {
         .archive
         .then(|| ledger.as_ref().map(Ledger::archive))
         .flatten();
-    let modlog_store = ledger.as_ref().map(Ledger::modlog);
+    let modlog_store = config.modlog.then(|| ledger.as_ref().map(Ledger::modlog)).flatten();
 
     // the wall's plumbing: one enrichment cache shared by every gateway and the backfill
     // path, one broadcast both gateways pour into and every browser drinks from.

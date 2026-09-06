@@ -64,7 +64,7 @@ impl KurouServer {
         }): Parameters<SendMessageRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let sender = self.sender_for(&caller_identity(&extensions))?;
+        let sender = self.sender_for(&caller_identity(&extensions)?)?;
         let channel = parse_channel(&channel_id)?;
         self.guard_send_target(channel).await?;
         let attachments =

@@ -80,6 +80,11 @@ pub struct Config {
     #[arg(long = "archive", env = "ARCHIVE", default_value_t = false, action = clap::ArgAction::Set)]
     pub archive: bool,
 
+    // the mod layer. opt-in: opens the ledger, arms the hands, grows the watcher's
+    // moderation ears (ban/member/timeout events) and starts the tempban scheduler.
+    #[arg(long = "modlog", env = "MODLOG", default_value_t = false, action = clap::ArgAction::Set)]
+    pub modlog: bool,
+
     // the crow's whole book lives in one sqlite file - mentions now, watch layout next,
     // phase-5 mod entries later. LEDGER_PATH is the name going forward; MENTION_DB_PATH
     // still works so a live unit doesn't orphan its db on upgrade. resolve via ledger_path().

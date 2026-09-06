@@ -37,7 +37,17 @@ impl Hand<'_> {
             ..Default::default()
         }
     }
+
+    // by the time this runs the discord action already succeeded, so a failed write
+    // must say so - "error" alone would read as "nothing happened", which is a lie
+    pub async fn record(&self, row: NewModAction) -> Result<i64, String> {
+        self.modlog
+            .record(Source::Crow, row)
+            .await
+            .map_err(|error| format!("the discord action WENT THROUGH but the ledger write failed - record it by hand: {error:#}"))
+    }
 }
+
 
 impl KurouServer {
     pub(crate) fn primary_guild(&self) -> Result<GuildId, String> {
@@ -45,9 +55,13 @@ impl KurouServer {
     }
 
     // the hand gate: same per-sister bot rule as send_message, plus an open ledger -
-    // the crow refuses to act anywhere it cannot leave a record.
-    pub(crate) fn hand(&self, extensions: &rmcp::model::Extensions) -> Result<Hand<'_>, String> {
-        let label = caller_identity(extensions);
+    // the crow refuses to act anywhere it cannot leave a record. intent is checked
+    // here, before any REST call, so a blank one can't act first and fail after.
+    pub(crate) fn hand(&self, extensions: &rmcp::model::Extensions, intent: &str) -> Result<Hand<'_>, String> {
+        if intent.trim().is_empty() {
+            return Err("intent must say who decided and why - an empty string is not a fingerprint".to_string());
+        }
+        let label = caller_identity(extensions)?;
         let client = self.sender_for(&label)?;
         let modlog = self.modlog()?;
         let guild = self.primary_guild()?;
@@ -176,7 +190,7 @@ impl KurouServer {
         Parameters(BanUserRequest { user_id, intent, reason, delete_message_days, duration_hours, dry_run }): Parameters<BanUserRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        let hand = self.hand(&extensions, &intent)?;
         let target = parse_user(&user_id)?;
         let target_user = hand.client.user(target).await.map_err(tool_error)?;
         let days = delete_message_days.unwrap_or(0).min(7);
@@ -204,7 +218,7 @@ impl KurouServer {
         row.expires_at = expires_at.clone();
         row.metadata = (days > 0 || duration_hours.is_some())
             .then(|| serde_json::json!({ "delete_message_days": days, "duration_hours": duration_hours }).to_string());
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
+        let ledger_id = hand.record(row).await?;
         json_text(&serde_json::json!({ "banned": target_user.name, "ledger_id": ledger_id, "expires_at": expires_at }))
     }
 
@@ -217,7 +231,7 @@ impl KurouServer {
         Parameters(UserActionRequest { user_id, intent, reason }): Parameters<UserActionRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        let hand = self.hand(&extensions, &intent)?;
         let target = parse_user(&user_id)?;
         let target_user = hand.client.user(target).await.map_err(tool_error)?;
         hand.client.unban(hand.guild, target, reason.as_deref()).await.map_err(tool_error)?;
@@ -225,8 +239,15 @@ impl KurouServer {
         row.target_id = Some(target.to_string());
         row.target_name = Some(target_user.name.clone());
         row.reason = reason;
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
-        json_text(&serde_json::json!({ "unbanned": target_user.name, "ledger_id": ledger_id }))
+        // a manual unban retires the ban it undoes - otherwise a tempban row stays
+        // pending and the scheduler double-reverses it at expiry
+        let open_ban = hand.modlog.latest_unreverted("ban", &target.to_string()).await.map_err(tool_error)?;
+        let ledger_id = match open_ban {
+            Some(ban_id) => hand.modlog.revert(ban_id, "ban", Source::Crow, row).await
+                .map_err(|error| format!("the unban WENT THROUGH but the ledger write failed - record it by hand: {error:#}"))?,
+            None => hand.record(row).await?,
+        };
+        json_text(&serde_json::json!({ "unbanned": target_user.name, "ledger_id": ledger_id, "retired_ban": open_ban }))
     }
 
     #[tool(
@@ -238,7 +259,7 @@ impl KurouServer {
         Parameters(UserActionRequest { user_id, intent, reason }): Parameters<UserActionRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        let hand = self.hand(&extensions, &intent)?;
         let target = parse_user(&user_id)?;
         let target_user = hand.client.user(target).await.map_err(tool_error)?;
         hand.client.kick(hand.guild, target, reason.as_deref()).await.map_err(tool_error)?;
@@ -246,7 +267,7 @@ impl KurouServer {
         row.target_id = Some(target.to_string());
         row.target_name = Some(target_user.name.clone());
         row.reason = reason;
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
+        let ledger_id = hand.record(row).await?;
         json_text(&serde_json::json!({ "kicked": target_user.name, "ledger_id": ledger_id }))
     }
 
@@ -259,9 +280,12 @@ impl KurouServer {
         Parameters(TimeoutUserRequest { user_id, duration_minutes, intent, reason }): Parameters<TimeoutUserRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        let hand = self.hand(&extensions, &intent)?;
         let target = parse_user(&user_id)?;
-        let minutes = duration_minutes.clamp(1, MAX_TIMEOUT_MINUTES);
+        if duration_minutes == 0 {
+            return Err(format!("duration_minutes must be 1-{MAX_TIMEOUT_MINUTES}; zero is not a timeout"));
+        }
+        let minutes = duration_minutes.min(MAX_TIMEOUT_MINUTES);
         let until = Timestamp::from_unix_timestamp(Timestamp::now().unix_timestamp() + i64::from(minutes) * 60)
             .map_err(|error| format!("could not build timeout timestamp: {error}"))?;
         let member = hand.client.timeout(hand.guild, target, until, reason.as_deref()).await.map_err(tool_error)?;
@@ -270,7 +294,7 @@ impl KurouServer {
         row.target_name = Some(member.user.name.clone());
         row.reason = reason;
         row.metadata = Some(serde_json::json!({ "duration_minutes": minutes, "until": until.to_string() }).to_string());
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
+        let ledger_id = hand.record(row).await?;
         json_text(&serde_json::json!({ "timed_out": member.user.name, "until": until.to_string(), "ledger_id": ledger_id }))
     }
 
@@ -283,15 +307,20 @@ impl KurouServer {
         Parameters(UserActionRequest { user_id, intent, reason }): Parameters<UserActionRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        let hand = self.hand(&extensions, &intent)?;
         let target = parse_user(&user_id)?;
         let member = hand.client.untimeout(hand.guild, target, reason.as_deref()).await.map_err(tool_error)?;
         let mut row = hand.row("timeout_remove", intent).await;
         row.target_id = Some(target.to_string());
         row.target_name = Some(member.user.name.clone());
         row.reason = reason;
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
-        json_text(&serde_json::json!({ "timeout_lifted": member.user.name, "ledger_id": ledger_id }))
+        let open_timeout = hand.modlog.latest_unreverted("timeout", &target.to_string()).await.map_err(tool_error)?;
+        let ledger_id = match open_timeout {
+            Some(timeout_id) => hand.modlog.revert(timeout_id, "timeout", Source::Crow, row).await
+                .map_err(|error| format!("the timeout lift WENT THROUGH but the ledger write failed - record it by hand: {error:#}"))?,
+            None => hand.record(row).await?,
+        };
+        json_text(&serde_json::json!({ "timeout_lifted": member.user.name, "ledger_id": ledger_id, "retired_timeout": open_timeout }))
     }
 
     #[tool(
@@ -303,21 +332,18 @@ impl KurouServer {
         Parameters(WarnUserRequest { user_id, reason, intent }): Parameters<WarnUserRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        // warn's fingerprint check rides on reason - intent stays optional here because
+        // the reason IS the warning text of record
+        let hand = self.hand(&extensions, &reason)?;
         let target = parse_user(&user_id)?;
         let target_user = hand.client.user(target).await.map_err(tool_error)?;
-        let mut row = hand.row("warn", intent.unwrap_or_else(|| format!("{}: {}", caller_identity(&extensions), reason))).await;
+        let intent = intent.filter(|intent| !intent.trim().is_empty()).unwrap_or_else(|| format!("{}: {}", hand.label, reason));
+        let mut row = hand.row("warn", intent).await;
         row.target_id = Some(target.to_string());
         row.target_name = Some(target_user.name.clone());
         row.reason = Some(reason);
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
-        let strikes = hand.modlog
-            .query(crate::modlog::ModlogFilter { target_id: Some(target.to_string()), action: Some("warn".to_string()), ..Default::default() }, 100)
-            .await
-            .map_err(tool_error)?
-            .iter()
-            .filter(|row| row.reverted_by.is_none())
-            .count();
+        let ledger_id = hand.record(row).await?;
+        let strikes = hand.modlog.count_active("warn", &target.to_string()).await.map_err(tool_error)?;
         json_text(&serde_json::json!({ "warned": target_user.name, "ledger_id": ledger_id, "active_warns": strikes }))
     }
 
@@ -330,7 +356,7 @@ impl KurouServer {
         Parameters(RevokeWarnRequest { ledger_id, intent }): Parameters<RevokeWarnRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        let hand = self.hand(&extensions, &intent)?;
         let row = hand.row("warn_revoke", intent).await;
         let reversal_id = hand.modlog.revert(ledger_id, "warn", Source::Crow, row).await.map_err(tool_error)?;
         json_text(&serde_json::json!({ "revoked": ledger_id, "reversal_id": reversal_id }))
@@ -345,7 +371,7 @@ impl KurouServer {
         Parameters(RoleRequest { user_id, role_id, intent, reason }): Parameters<RoleRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        let hand = self.hand(&extensions, &intent)?;
         let target = parse_user(&user_id)?;
         let role = parse_role(&role_id)?;
         hand.client.add_role(hand.guild, target, role, reason.as_deref()).await.map_err(tool_error)?;
@@ -353,7 +379,7 @@ impl KurouServer {
         row.target_id = Some(target.to_string());
         row.reason = reason;
         row.metadata = Some(serde_json::json!({ "role_id": role.to_string() }).to_string());
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
+        let ledger_id = hand.record(row).await?;
         json_text(&serde_json::json!({ "role_added": role.to_string(), "to": target.to_string(), "ledger_id": ledger_id }))
     }
 
@@ -366,7 +392,7 @@ impl KurouServer {
         Parameters(RoleRequest { user_id, role_id, intent, reason }): Parameters<RoleRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        let hand = self.hand(&extensions, &intent)?;
         let target = parse_user(&user_id)?;
         let role = parse_role(&role_id)?;
         hand.client.remove_role(hand.guild, target, role, reason.as_deref()).await.map_err(tool_error)?;
@@ -374,7 +400,7 @@ impl KurouServer {
         row.target_id = Some(target.to_string());
         row.reason = reason;
         row.metadata = Some(serde_json::json!({ "role_id": role.to_string() }).to_string());
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
+        let ledger_id = hand.record(row).await?;
         json_text(&serde_json::json!({ "role_removed": role.to_string(), "from": target.to_string(), "ledger_id": ledger_id }))
     }
 
@@ -387,7 +413,7 @@ impl KurouServer {
         Parameters(SetNicknameRequest { user_id, nickname, intent, reason }): Parameters<SetNicknameRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        let hand = self.hand(&extensions, &intent)?;
         let target = parse_user(&user_id)?;
         let previous = self.client.member(hand.guild, target).await.ok().and_then(|member| member.nick);
         let member = hand.client.set_nickname(hand.guild, target, &nickname, reason.as_deref()).await.map_err(tool_error)?;
@@ -396,7 +422,7 @@ impl KurouServer {
         row.target_name = Some(member.user.name.clone());
         row.reason = reason;
         row.metadata = Some(serde_json::json!({ "nickname": nickname, "previous": previous }).to_string());
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
+        let ledger_id = hand.record(row).await?;
         json_text(&serde_json::json!({ "renamed": member.user.name, "nickname": nickname, "ledger_id": ledger_id }))
     }
 
@@ -409,7 +435,7 @@ impl KurouServer {
         Parameters(DeleteMessageRequest { channel_id, message_id, intent, reason }): Parameters<DeleteMessageRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
-        let hand = self.hand(&extensions)?;
+        let hand = self.hand(&extensions, &intent)?;
         let channel = parse_channel(&channel_id)?;
         let message = parse_message(&message_id)?;
         self.guard_primary_channel(channel).await?;
@@ -421,7 +447,7 @@ impl KurouServer {
         row.channel_id = Some(channel.to_string());
         row.reason = reason;
         row.metadata = Some(serde_json::json!({ "message_id": message.to_string(), "content": snapshot.content }).to_string());
-        let ledger_id = hand.modlog.record(Source::Crow, row).await.map_err(tool_error)?;
+        let ledger_id = hand.record(row).await?;
         json_text(&serde_json::json!({ "deleted": message.to_string(), "author": snapshot.author.name, "ledger_id": ledger_id }))
     }
 }

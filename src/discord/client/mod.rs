@@ -158,7 +158,17 @@ impl DiscordClient {
     }
 
     pub async fn bans(&self, guild_id: GuildId) -> Result<Vec<Ban>> {
-        Ok(self.http.get_bans(guild_id, None, Some(100)).await?)
+        let mut all = Vec::new();
+        let mut after: Option<UserId> = None;
+        loop {
+            let page = self.http.get_bans(guild_id, after.map(serenity::http::UserPagination::After), Some(100)).await?;
+            let full_page = page.len() == 100;
+            after = page.last().map(|ban| ban.user.id);
+            all.extend(page);
+            if !full_page {
+                return Ok(all);
+            }
+        }
     }
 
     pub async fn invites(&self, guild_id: GuildId) -> Result<Vec<RichInvite>> {

@@ -7,7 +7,7 @@ use crate::server::KurouServer;
 use crate::server::tools::common::{caller_identity, json_text, tool_error};
 
 fn guard_koma_only(extensions: &rmcp::model::Extensions) -> Result<(), String> {
-    let identity = caller_identity(extensions);
+    let identity = caller_identity(extensions)?;
     if identity == "koma" {
         return Ok(());
     }

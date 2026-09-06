@@ -78,6 +78,7 @@ pub struct ModlogFilter {
     pub executor_id: Option<String>,
     pub action: Option<String>,
     pub source: Option<String>,
+    pub channel_id: Option<String>,
     pub since: Option<String>,
     pub until: Option<String>,
 }
@@ -183,6 +184,43 @@ impl ModlogStore {
         .context("modlog revert task")?
     }
 
+    // the newest row of this kind against this user that nothing has undone yet -
+    // how an unban finds the tempban it retires
+    pub async fn latest_unreverted(&self, action: &str, target_id: &str) -> Result<Option<i64>> {
+        let path = self.path.clone();
+        let action = action.to_string();
+        let target = target_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = crate::ledger::connect(&path).context("modlog connect")?;
+            conn.query_row(
+                "select id from modlog where action = ?1 and target_id = ?2 and reverted_by is null order by id desc limit 1",
+                params![action, target],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("query latest unreverted")
+        })
+        .await
+        .context("modlog latest task")?
+    }
+
+    pub async fn count_active(&self, action: &str, target_id: &str) -> Result<i64> {
+        let path = self.path.clone();
+        let action = action.to_string();
+        let target = target_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = crate::ledger::connect(&path).context("modlog connect")?;
+            conn.query_row(
+                "select count(*) from modlog where action = ?1 and target_id = ?2 and reverted_by is null",
+                params![action, target],
+                |row| row.get(0),
+            )
+            .context("count active rows")
+        })
+        .await
+        .context("modlog count task")?
+    }
+
     // the scheduler's worklist: crow actions carrying an unexpired expiry. the time
     // comparison happens in rust - text timestamps stay out of sql date math.
     pub async fn pending_expiries(&self) -> Result<Vec<ModAction>> {
@@ -198,6 +236,7 @@ impl ModlogStore {
                         reverted_by, created_at
                     from modlog
                     where expires_at is not null and reverted_by is null
+                      and action = 'ban' and source = 'crow'
                     "#,
                 )
                 .context("prepare pending expiries")?;
@@ -223,6 +262,7 @@ impl ModlogStore {
                 ("executor_id = ?", filter.executor_id),
                 ("action = ?", filter.action),
                 ("source = ?", filter.source),
+                ("channel_id = ?", filter.channel_id),
                 ("created_at >= ?", filter.since),
                 ("created_at <= ?", filter.until),
             ];

@@ -33,11 +33,14 @@ async fn due_expiries(modlog: &ModlogStore) -> Result<Vec<ModAction>> {
     let pending = modlog.pending_expiries().await?;
     Ok(pending
         .into_iter()
-        .filter(|row| {
-            row.expires_at
-                .as_deref()
-                .and_then(|raw| Timestamp::parse(raw).ok())
-                .is_some_and(|expiry| expiry.unix_timestamp() <= now)
+        .filter(|row| match row.expires_at.as_deref().map(Timestamp::parse) {
+            Some(Ok(expiry)) => expiry.unix_timestamp() <= now,
+            Some(Err(error)) => {
+                // never silently permanent: a garbage expiry needs a human's eyes
+                tracing::warn!(ledger_id = row.id, error = %error, "tempban has an unparseable expires_at and will never expire on its own");
+                false
+            }
+            None => false,
         })
         .collect())
 }
