@@ -184,6 +184,10 @@ impl DiscordClient {
         Ok(channel_id.create_permission(&self.http, overwrite).await?)
     }
 
+    pub async fn send_embed(&self, channel_id: ChannelId, embed: serenity::builder::CreateEmbed) -> Result<Message> {
+        Ok(channel_id.send_message(&self.http, CreateMessage::new().embed(embed)).await?)
+    }
+
     pub async fn set_nickname(&self, guild_id: GuildId, user_id: UserId, nickname: &str, reason: Option<&str>) -> Result<Member> {
         let mut builder = EditMember::new().nickname(nickname);
         if let Some(reason) = reason {

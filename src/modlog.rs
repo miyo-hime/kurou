@@ -8,6 +8,78 @@ use serde::Serialize;
 #[derive(Clone, Debug)]
 pub struct ModlogStore {
     path: Arc<PathBuf>,
+    notifier: Option<Notifier>,
+}
+
+// the crow's diary going public: every ledger write mirrored as an embed, posted with
+// the crow's own voice no matter whose hand acted. fire-and-forget by design - a
+// discord hiccup must never block or fail the write it narrates.
+#[derive(Clone, Debug)]
+pub struct Notifier {
+    pub client: crate::discord::DiscordClient,
+    pub channel: serenity::model::id::ChannelId,
+}
+
+impl Notifier {
+    fn post(&self, source: Source, row: NewModAction, ledger_id: i64, reverts: Option<i64>) {
+        if matches!(row.action.as_str(), "join" | "leave") {
+            return;
+        }
+        let notifier = self.clone();
+        tokio::spawn(async move {
+            let embed = build_embed(source, &row, ledger_id, reverts);
+            if let Err(error) = notifier.client.send_embed(notifier.channel, embed).await {
+                tracing::warn!(error = format!("{error:#}"), ledger_id, "failed to post modlog embed");
+            }
+        });
+    }
+}
+
+fn build_embed(source: Source, row: &NewModAction, ledger_id: i64, reverts: Option<i64>) -> serenity::builder::CreateEmbed {
+    let (emoji, color) = match row.action.as_str() {
+        "ban" => ("🔨", 0xd83c3e),
+        "unban" | "warn_revoke" | "timeout_remove" | "unlock" => ("🕊️", 0x57f287),
+        "kick" => ("🥾", 0xe67e22),
+        "timeout" => ("🤐", 0xe67e22),
+        "warn" => ("⚠️", 0xfee75c),
+        "delete" | "purge" => ("🧹", 0xe67e22),
+        "role_add" | "role_remove" => ("🎭", 0x5865f2),
+        "nickname" => ("🏷️", 0x5865f2),
+        "lock" => ("🔒", 0xd83c3e),
+        "slowmode" => ("🐌", 0x5865f2),
+        "invite_delete" => ("🚪", 0xe67e22),
+        _ => ("🐦‍⬛", 0x5865f2),
+    };
+    let mut embed = serenity::builder::CreateEmbed::new()
+        .title(format!("{emoji} {}", row.action))
+        .color(color)
+        .timestamp(serenity::model::timestamp::Timestamp::now())
+        .footer(serenity::builder::CreateEmbedFooter::new(match source {
+            Source::Crow => format!("ledger #{ledger_id} · by the crow's hand"),
+            Source::Observed => format!("ledger #{ledger_id} · witnessed"),
+        }));
+    if let (Some(id), name) = (&row.target_id, row.target_name.as_deref().unwrap_or("?")) {
+        embed = embed.field("target", format!("{name} (<@{id}>)"), true);
+    }
+    if let Some(executor) = &row.executor_name {
+        embed = embed.field("executor", executor.clone(), true);
+    }
+    if let Some(channel) = &row.channel_id {
+        embed = embed.field("channel", format!("<#{channel}>"), true);
+    }
+    if let Some(reason) = &row.reason {
+        embed = embed.field("reason", reason.clone(), false);
+    }
+    if let Some(intent) = &row.intent {
+        embed = embed.field("intent", intent.clone(), false);
+    }
+    if let Some(metadata) = &row.metadata {
+        embed = embed.field("details", format!("`{metadata}`"), false);
+    }
+    if let Some(original) = reverts {
+        embed = embed.field("reverts", format!("ledger #{original}"), true);
+    }
+    embed
 }
 
 // the load-bearing column: who wrote the row. observed = the watcher saw someone
@@ -85,12 +157,18 @@ pub struct ModlogFilter {
 
 impl ModlogStore {
     pub fn new(path: Arc<PathBuf>) -> Self {
-        Self { path }
+        Self { path, notifier: None }
+    }
+
+    pub fn with_notifier(mut self, notifier: Option<Notifier>) -> Self {
+        self.notifier = notifier;
+        self
     }
 
     pub async fn record(&self, source: Source, action: NewModAction) -> Result<i64> {
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
+        let for_embed = action.clone();
+        let ledger_id = tokio::task::spawn_blocking(move || -> Result<i64> {
             let conn = crate::ledger::connect(&path).context("modlog connect")?;
             conn.execute(
                 r#"
@@ -118,7 +196,11 @@ impl ModlogStore {
             Ok(conn.last_insert_rowid())
         })
         .await
-        .context("modlog record task")?
+        .context("modlog record task")??;
+        if let Some(notifier) = &self.notifier {
+            notifier.post(source, for_embed, ledger_id, None);
+        }
+        Ok(ledger_id)
     }
 
     // undoing leaves two rows: the original gains reverted_by, the reversal is its own
@@ -127,7 +209,7 @@ impl ModlogStore {
     pub async fn revert(&self, original_id: i64, expected_action: &str, source: Source, action: NewModAction) -> Result<i64> {
         let path = self.path.clone();
         let expected = expected_action.to_string();
-        tokio::task::spawn_blocking(move || {
+        let (reversal_id, filled) = tokio::task::spawn_blocking(move || {
             let conn = crate::ledger::connect(&path).context("modlog connect")?;
             let tx = conn.unchecked_transaction().context("begin revert")?;
             struct Original { action: String, reverted_by: Option<i64>, target_id: Option<String>, target_name: Option<String> }
@@ -178,10 +260,14 @@ impl ModlogStore {
             tx.execute("update modlog set reverted_by = ?1 where id = ?2", params![reversal_id, original_id])
                 .context("mark original reverted")?;
             tx.commit().context("commit revert")?;
-            Ok(reversal_id)
+            Ok((reversal_id, action))
         })
         .await
-        .context("modlog revert task")?
+        .context("modlog revert task")??;
+        if let Some(notifier) = &self.notifier {
+            notifier.post(source, filled, reversal_id, Some(original_id));
+        }
+        Ok(reversal_id)
     }
 
     // the newest row of this kind against this user that nothing has undone yet -

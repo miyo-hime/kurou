@@ -85,6 +85,11 @@ pub struct Config {
     #[arg(long = "modlog", env = "MODLOG", default_value_t = false, action = clap::ArgAction::Set)]
     pub modlog: bool,
 
+    // where the ledger goes public: every mod row (joins/leaves excepted) posted as an
+    // embed to this channel, in the crow's own voice. optional.
+    #[arg(long = "modlog-channel", env = "MODLOG_CHANNEL")]
+    pub modlog_channel: Option<String>,
+
     // the crow's whole book lives in one sqlite file - mentions now, watch layout next,
     // phase-5 mod entries later. LEDGER_PATH is the name going forward; MENTION_DB_PATH
     // still works so a live unit doesn't orphan its db on upgrade. resolve via ledger_path().
