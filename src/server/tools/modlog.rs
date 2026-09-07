@@ -3,7 +3,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::modlog::ModlogFilter;
+use crate::clock::house_time;
+use crate::modlog::{ModAction, ModlogFilter};
 use crate::server::KurouServer;
 use crate::server::tools::common::{json_text, tool_error};
 
@@ -52,7 +53,8 @@ impl KurouServer {
         // a bare date as until would sort before that day's own timestamps and exclude it
         let until = until.map(|until| if until.len() == 10 { format!("{until} 23:59:59") } else { until });
         let filter = ModlogFilter { target_id, executor_id, action, source, channel_id, since, until };
-        let actions = self.modlog()?.query(filter, limit.unwrap_or(25).clamp(1, 100)).await.map_err(tool_error)?;
+        let mut actions = self.modlog()?.query(filter, limit.unwrap_or(25).clamp(1, 100)).await.map_err(tool_error)?;
+        render_times(&mut actions);
         json_text(&actions)
     }
 
@@ -65,8 +67,16 @@ impl KurouServer {
         Parameters(UserHistoryRequest { user_id, limit }): Parameters<UserHistoryRequest>,
     ) -> Result<String, String> {
         let filter = ModlogFilter { target_id: Some(user_id), ..Default::default() };
-        let actions = self.modlog()?.query(filter, limit.unwrap_or(50).clamp(1, 100)).await.map_err(tool_error)?;
+        let mut actions = self.modlog()?.query(filter, limit.unwrap_or(50).clamp(1, 100)).await.map_err(tool_error)?;
+        render_times(&mut actions);
         json_text(&actions)
+    }
+}
+
+fn render_times(actions: &mut [ModAction]) {
+    for action in actions {
+        action.created_at = house_time(&action.created_at);
+        action.expires_at = action.expires_at.as_deref().map(house_time);
     }
 }
 

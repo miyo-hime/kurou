@@ -51,7 +51,7 @@ pub struct GetPinnedRequest {
 impl KurouServer {
     #[tool(
         name = "read_messages",
-        description = "Read messages from a channel or thread as compact blocks, newest first. Without an anchor you get the latest; pass around/before/after a message id to read a specific slice (e.g. around a mention). Reactions, attachments, stickers, embeds, and reply context are included when present."
+        description = "Read messages from a channel or thread as compact blocks in chronological order (oldest to newest). Without an anchor you get the latest window; pass around/before/after a message id to read a specific slice (e.g. around a mention). Reactions, attachments, stickers, embeds, and reply context are included when present."
     )]
     pub async fn read_messages(
         &self,
@@ -68,7 +68,9 @@ impl KurouServer {
         // 3am-me clamp: no yanking the whole backlog in one call
         let limit = limit.unwrap_or(50).clamp(1, 100);
         let client = self.client_for_channel(channel).await;
-        let messages = client.messages(channel, anchor, limit).await.map_err(tool_error)?;
+        let mut messages = client.messages(channel, anchor, limit).await.map_err(tool_error)?;
+        // discord returns newest-first for EVERY anchor mode, after included - smoked live 2026-09-07. the dpy ascending-after lore is their normalization, not the api
+        messages.reverse();
         let context = client.channel(channel).await.ok().flatten();
         let mut rendered = messages.iter().map(RenderedMessage::from).collect::<Vec<_>>();
         if let Some(guild) = context.as_ref().map(|c| c.guild_id) {

@@ -3,6 +3,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde::{Deserialize, Serialize};
 
+use crate::clock::house_time;
 use crate::server::KurouServer;
 use crate::server::tools::common::{json_text, tool_error};
 
@@ -32,10 +33,13 @@ impl KurouServer {
             .message_store
             .as_ref()
             .ok_or_else(|| "message archive is disabled; set ARCHIVE=true".to_string())?;
-        let hits = store
+        let mut hits = store
             .search(&query, limit.unwrap_or(20).clamp(1, 100))
             .await
             .map_err(tool_error)?;
+        for hit in &mut hits {
+            hit.timestamp = house_time(&hit.timestamp);
+        }
         json_text(&hits)
     }
 }

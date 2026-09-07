@@ -1,5 +1,6 @@
 mod archive;
 mod auth;
+mod clock;
 mod config;
 #[cfg(test)]
 mod contract_tests;

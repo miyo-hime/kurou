@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "kurou"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -960,6 +960,7 @@ dependencies = [
  "serde_json",
  "serenity",
  "sha2",
+ "time",
  "tokio",
  "tokio-stream",
  "tokio-util",

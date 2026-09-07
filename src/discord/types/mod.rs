@@ -6,6 +6,8 @@ use serenity::model::guild::Member;
 use serenity::model::guild::PartialGuild;
 use serenity::model::sticker::StickerItem;
 
+use crate::clock::house_time;
+
 #[derive(Serialize)]
 pub struct ServerInfo {
     pub id: String,
@@ -309,21 +311,26 @@ pub fn render_messages(messages: &[RenderedMessage]) -> String {
             output.push('\n');
         }
 
-        let _ = writeln!(
-            output,
-            "[id={}, author_id={}, author={}, timestamp={}]",
-            message.id,
-            message.author_id,
-            author_label(message.author_display.as_deref(), &message.author_name),
-            message.timestamp
-        );
+        let repeated_author = index > 0 && messages[index - 1].author_id == message.author_id;
+        if repeated_author {
+            let _ = writeln!(output, "[id={}, timestamp={}]", message.id, house_time(&message.timestamp));
+        } else {
+            let _ = writeln!(
+                output,
+                "[id={}, author_id={}, author={}, timestamp={}]",
+                message.id,
+                message.author_id,
+                author_label(message.author_display.as_deref(), &message.author_name),
+                house_time(&message.timestamp)
+            );
+        }
 
         if let Some(kind) = &message.kind {
             let _ = writeln!(output, "type: {kind}");
         }
 
         if let Some(edited) = &message.edited_timestamp {
-            let _ = writeln!(output, "edited: {edited}");
+            let _ = writeln!(output, "edited: {}", house_time(edited));
         }
 
         if let Some(reply) = &message.reply {
@@ -390,7 +397,7 @@ pub fn render_messages(messages: &[RenderedMessage]) -> String {
 
 fn format_forward(forward: &RenderedForward) -> String {
     let mut output = String::new();
-    let _ = writeln!(output, "forwarded: [timestamp={}]", forward.timestamp);
+    let _ = writeln!(output, "forwarded: [timestamp={}]", house_time(&forward.timestamp));
 
     if !forward.attachments.is_empty() {
         output.push_str("forwarded attachments:\n");
@@ -430,7 +437,7 @@ fn format_poll(poll: &RenderedPoll) -> String {
     if poll.finalized {
         header.push_str(" (final)");
     } else if let Some(expiry) = &poll.expiry {
-        let _ = write!(header, " (expires {expiry})");
+        let _ = write!(header, " (expires {})", house_time(expiry));
     }
     let _ = writeln!(output, "{header}");
 
@@ -551,6 +558,26 @@ fn short_inline(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn plain_message(id: &str, author_id: &str, author_name: &str) -> RenderedMessage {
+        RenderedMessage {
+            id: id.to_owned(),
+            author_id: author_id.to_owned(),
+            author_name: author_name.to_owned(),
+            author_display: None,
+            timestamp: "t".to_owned(),
+            edited_timestamp: None,
+            kind: None,
+            reply: None,
+            forwarded: None,
+            poll: None,
+            reactions: Vec::new(),
+            attachments: Vec::new(),
+            stickers: Vec::new(),
+            embeds: Vec::new(),
+            content: String::new(),
+        }
+    }
+
     #[test]
     fn renders_channel_header() {
         let mut channel = GuildChannel::default();
@@ -605,8 +632,8 @@ mod tests {
             content: "look up".to_owned(),
         };
 
-        let expected = "[id=42, author_id=7, author=\"koma\", timestamp=2026-07-01T00:00:00Z]\n\
-            edited: 2026-07-01T00:01:00Z\n\
+        let expected = "[id=42, author_id=7, author=\"koma\", timestamp=2026-07-01T07:00:00+07:00]\n\
+            edited: 2026-07-01T07:01:00+07:00\n\
             reply-to: [id=41, author=\"kurone\"] the cat asks\n\
             reactions: 🐦 x3\n\
             attachments:\n\
@@ -682,8 +709,8 @@ mod tests {
             content: "look at this".to_owned(),
         };
 
-        let expected = "[id=50, author_id=7, author=\"miyo\", timestamp=2026-08-10T12:00:00Z]\n\
-            forwarded: [timestamp=2026-08-09T09:00:00Z]\n\
+        let expected = "[id=50, author_id=7, author=\"miyo\", timestamp=2026-08-10T19:00:00+07:00]\n\
+            forwarded: [timestamp=2026-08-09T16:00:00+07:00]\n\
             forwarded attachments:\n\
             - id=9 filename=\"setup.png\" size=1024b url=https://cdn/setup.png\n\
             > anima setup notes\n\
@@ -723,11 +750,28 @@ mod tests {
         };
 
         let expected = "[id=51, author_id=7, author=\"miyo\", timestamp=t]\n\
-            poll: \"best rabbit?\" (multiselect) (expires 2026-08-11T00:00:00Z)\n\
+            poll: \"best rabbit?\" (multiselect) (expires 2026-08-11T07:00:00+07:00)\n\
             - pyonka x3\n\
             - furin\n";
 
         assert_eq!(render_messages(std::slice::from_ref(&message)), expected);
+    }
+
+    #[test]
+    fn consecutive_messages_from_one_author_use_slim_headers() {
+        let messages = [
+            plain_message("1", "7", "koma"),
+            plain_message("2", "7", "koma"),
+            plain_message("3", "8", "koma"),
+        ];
+        let rendered = render_messages(&messages);
+        let headers = rendered.lines().filter(|line| line.starts_with("[id=")).collect::<Vec<_>>();
+
+        assert_eq!(headers, [
+            "[id=1, author_id=7, author=\"koma\", timestamp=t]",
+            "[id=2, timestamp=t]",
+            "[id=3, author_id=8, author=\"koma\", timestamp=t]",
+        ]);
     }
 
     #[test]

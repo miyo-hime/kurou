@@ -146,7 +146,7 @@ impl KurouServer {
 #[tool_handler(
     router = self.tool_router,
     name = "kurou",
-    version = "0.15.1",
+    version = "0.16.0",
     instructions = "a small window into a discord server. crow on the wire. reads: list_servers, get_server_info, list_channels, list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). archive: search_messages (full-text search the local message archive, needs ARCHIVE=true). voice: send_message, get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. mod ledger: check_ledger, user_history - the crow's moderation memory, every action it witnessed or performed. mod hands (primary guild only, caller's own bot, intent required, every act recorded): ban_user, unban_user, kick_user, timeout_user, untimeout_user, warn_user, revoke_warn, add_role, remove_role, set_nickname, delete_message, lock_channel, unlock_channel, set_slowmode, purge_channel, delete_invite; get_bans and list_invites are open reads. the watcher also records what other moderators do: bans, unbans, kicks, timeouts, joins and leaves land as observed ledger rows. read-only secondary guilds ride a separate observer bot, routed for you. multi-identity: every caller is a labeled bearer - reads are open to all sisters, send_message and the mod hands act with the caller's own bot voice or refuse, and the mention inbox answers only to koma."
 )]
 impl ServerHandler for KurouServer {}
