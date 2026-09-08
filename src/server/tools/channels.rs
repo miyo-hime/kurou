@@ -30,24 +30,62 @@ pub struct ListThreadsRequest {
     pub guild_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema, Serialize)]
+pub struct ListGuildStickersRequest {
+    #[schemars(description = "guild (server) snowflake id. defaults to DISCORD_GUILD_ID when omitted")]
+    pub guild_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GuildExpression {
+    name: String,
+    id: String,
+}
+
+#[derive(Serialize)]
+struct ChannelDirectory {
+    channels: Vec<ChannelInfo>,
+    emojis: Vec<GuildExpression>,
+    stickers: Vec<GuildExpression>,
+    culture_hint: &'static str,
+}
+
 #[tool_router(router = channels_router)]
 impl KurouServer {
     #[tool(
         name = "list_channels",
-        description = "List channels in a Discord guild, each with its id, name, kind, and topic. Defaults to Text, News, and Forum; pass kinds='all' for every channel kind, or a comma-separated list for specific kinds."
+        description = "List channels in a Discord guild, each with its id, name, kind, and topic. Also returns the guild's custom emoji and sticker names and ids so callers can use <:name:id> in content or sticker_ids in send_message when one fits. Defaults to Text, News, and Forum; pass kinds='all' for every channel kind, or a comma-separated list for specific kinds."
     )]
     pub async fn list_channels(
         &self,
         Parameters(ListChannelsRequest { guild_id, kinds }): Parameters<ListChannelsRequest>,
     ) -> Result<String, String> {
         let guild = resolve_guild(guild_id, self.default_guild, self.readonly_guilds())?;
-        let channels = self
-            .client_for_guild(guild)
-            .channels(guild)
-            .await
-            .map_err(tool_error)?;
-        let infos: Vec<ChannelInfo> = channels.into_iter().filter(|channel| kind_matches(&channel.kind, kinds.as_deref())).map(ChannelInfo::from).collect();
-        json_text(&infos)
+        let client = self.client_for_guild(guild);
+        let (channels, emojis, stickers) = tokio::try_join!(client.channels(guild), client.guild_emojis(guild), client.guild_stickers(guild)).map_err(tool_error)?;
+        let channels = channels.into_iter().filter(|channel| kind_matches(&channel.kind, kinds.as_deref())).map(ChannelInfo::from).collect();
+        let emojis = emojis.into_iter().map(|emoji| GuildExpression { name: emoji.name, id: emoji.id.to_string() }).collect();
+        let stickers = stickers.into_iter().map(|sticker| GuildExpression { name: sticker.name, id: sticker.id.to_string() }).collect();
+        json_text(&ChannelDirectory {
+            channels,
+            emojis,
+            stickers,
+            culture_hint: "Custom emojis and stickers are part of this server's social culture. Reach for them when they fit.",
+        })
+    }
+
+    #[tool(
+        name = "list_guild_stickers",
+        description = "List a Discord guild's custom stickers by name and id. Pass an id as sticker_ids in send_message to send it."
+    )]
+    pub async fn list_guild_stickers(
+        &self,
+        Parameters(ListGuildStickersRequest { guild_id }): Parameters<ListGuildStickersRequest>,
+    ) -> Result<String, String> {
+        let guild = resolve_guild(guild_id, self.default_guild, self.readonly_guilds())?;
+        let stickers = self.client_for_guild(guild).guild_stickers(guild).await.map_err(tool_error)?;
+        let stickers: Vec<GuildExpression> = stickers.into_iter().map(|sticker| GuildExpression { name: sticker.name, id: sticker.id.to_string() }).collect();
+        json_text(&stickers)
     }
 
     #[tool(

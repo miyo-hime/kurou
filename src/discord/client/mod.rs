@@ -4,10 +4,11 @@ use anyhow::Result;
 use serenity::builder::{CreateAttachment, CreateMessage, EditChannel, EditMember};
 use serenity::http::{Http, MessagePagination};
 use serenity::model::channel::{GuildChannel, Message, PermissionOverwrite};
-use serenity::model::guild::{Ban, Member, Role};
+use serenity::model::guild::{Ban, Emoji, Member, Role};
 use serenity::model::guild::PartialGuild;
-use serenity::model::id::{ChannelId, GuildId, MessageId, UserId};
+use serenity::model::id::{ChannelId, GuildId, MessageId, StickerId, UserId};
 use serenity::model::invite::RichInvite;
+use serenity::model::sticker::Sticker;
 use serenity::model::timestamp::Timestamp;
 use serenity::model::user::User;
 
@@ -34,6 +35,14 @@ impl DiscordClient {
 
     pub async fn channels(&self, guild_id: GuildId) -> Result<Vec<GuildChannel>> {
         Ok(self.http.get_channels(guild_id).await?)
+    }
+
+    pub async fn guild_emojis(&self, guild_id: GuildId) -> Result<Vec<Emoji>> {
+        Ok(self.http.get_emojis(guild_id).await?)
+    }
+
+    pub async fn guild_stickers(&self, guild_id: GuildId) -> Result<Vec<Sticker>> {
+        Ok(self.http.get_guild_stickers(guild_id).await?)
     }
 
     pub async fn channel(&self, channel_id: ChannelId) -> Result<Option<GuildChannel>> {
@@ -87,10 +96,14 @@ impl DiscordClient {
         channel_id: ChannelId,
         content: &str,
         attachments: Vec<AttachmentSource>,
+        sticker_ids: Vec<StickerId>,
     ) -> Result<Message> {
         let mut builder = CreateMessage::new();
         if !content.is_empty() {
             builder = builder.content(content);
+        }
+        if !sticker_ids.is_empty() {
+            builder = builder.sticker_ids(sticker_ids);
         }
         for source in attachments {
             let attachment = match source {
