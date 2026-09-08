@@ -136,6 +136,7 @@ impl KurouServer {
             + tools::mentions::router()
             + tools::archive::router()
             + tools::send::router()
+            + tools::typing::router()
             + tools::users::router()
             + tools::modlog::router()
             + tools::hands::router()
@@ -199,6 +200,7 @@ pub async fn run_stdio(config: Config) -> Result<()> {
             crow_bot_ids: Vec::new(),
             fanout: None,
             broadcast_guilds: Vec::new(),
+            wake: crate::wake::WakeSender::from_config(config.wake_url.as_deref(), config.wake_secret.as_deref()),
         },
     );
 
@@ -317,6 +319,7 @@ pub async fn run_http(config: Config) -> Result<()> {
             crow_bot_ids,
             fanout: primary_fanout,
             broadcast_guilds: default_guild.into_iter().collect(),
+            wake: crate::wake::WakeSender::from_config(config.wake_url.as_deref(), config.wake_secret.as_deref()),
         },
     );
 
@@ -348,6 +351,8 @@ pub async fn run_http(config: Config) -> Result<()> {
                     tx: wall_tx.clone(),
                 }),
                 broadcast_guilds: observer.guilds.clone(),
+                // the observer never taps - the perch answers to the primary guild only
+                wake: None,
             },
         ),
         _ => None,

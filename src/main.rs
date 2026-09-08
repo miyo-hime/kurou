@@ -14,6 +14,7 @@ mod oauth;
 mod scheduler;
 mod server;
 mod uploads;
+mod wake;
 mod wall;
 
 use anyhow::Result;

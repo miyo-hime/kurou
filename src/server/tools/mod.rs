@@ -9,4 +9,5 @@ pub mod modlog;
 pub mod raid;
 pub mod scan;
 pub mod send;
+pub mod typing;
 pub mod users;

@@ -103,6 +103,14 @@ pub struct Config {
         default_value = "koma"
     )]
     pub mention_keywords: Vec<String>,
+
+    // phase 6: every koma-sighting in the primary guild POSTs to the perch, HMAC-signed.
+    // both unset = tap off, zero new behavior. the crow taps, tomarigi judges.
+    #[arg(long = "wake-url", env = "WAKE_URL")]
+    pub wake_url: Option<String>,
+
+    #[arg(long = "wake-secret", env = "WAKE_SECRET")]
+    pub wake_secret: Option<String>,
 }
 
 // the sisters' own voices: DISCORD_TOKEN_MECHA=... gives the caller labeled 'mecha' her own

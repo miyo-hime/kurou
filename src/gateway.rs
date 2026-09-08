@@ -13,6 +13,7 @@ use crate::config::GatewayMode;
 use crate::discord::types::{RenderedMessage, display_name};
 use crate::mentions::{MentionStore, NewMention};
 use crate::modlog::{ModlogStore, NewModAction, Source};
+use crate::wake::{WakeSender, WakeTap};
 use crate::wall::event::{WallFanout, enrich};
 
 #[derive(Clone)]
@@ -30,6 +31,7 @@ pub struct GatewayConfig {
     // the guilds this gateway owns for the wall and the archive. when both bots share a
     // guild they both see the message, so only its owner records it - else we double up.
     pub broadcast_guilds: Vec<GuildId>,
+    pub wake: Option<WakeSender>,
 }
 
 pub fn spawn_gateway(token: String, config: GatewayConfig) -> Option<JoinHandle<()>> {
@@ -89,6 +91,7 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         seen_audit_entries: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         fanout: config.fanout,
         broadcast_guilds: config.broadcast_guilds,
+        wake: config.wake,
     };
     let mut client = Client::builder(token, intents)
         .event_handler(handler)
@@ -118,6 +121,7 @@ struct Handler {
     seen_audit_entries: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<u64>>>,
     fanout: Option<WallFanout>,
     broadcast_guilds: Vec<GuildId>,
+    wake: Option<WakeSender>,
 }
 
 // who pulled the trigger. the ban event itself never says - the answer lives in the
@@ -426,7 +430,7 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn message(&self, _ctx: Context, message: Message) {
+    async fn message(&self, ctx: Context, message: Message) {
         // the wall wants everything, koma's own posts included. it never acts on a
         // message, so there's no echo loop to fear here - just a mirror. but only for the
         // guilds this gateway owns: if both bots are in a guild, the other one carries it.
@@ -470,14 +474,32 @@ impl EventHandler for Handler {
             return;
         }
 
-        let Some(store) = &self.mention_store else {
-            tracing::warn!("mention gateway mode is enabled without a mention store");
-            return;
-        };
         let matched = matched_terms(&message, self.bot_user_id, &self.mention_keywords);
         if matched.is_empty() {
             return;
         }
+
+        // every koma-sighting taps the perch; authorization is tomarigi's job, kurou
+        // doesn't grow an allowlist, it grows a beak-tap
+        if let Some(wake) = &self.wake
+            && self.default_guild.is_some()
+        {
+            wake.tap(ctx.http.clone(), WakeTap {
+                channel_id: message.channel_id.to_string(),
+                channel_name: String::new(),
+                message_id: message.id.to_string(),
+                ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|now| now.as_secs()).unwrap_or(0),
+                author_id: message.author.id.to_string(),
+                author_name: message.author.name.clone(),
+                matched_terms: matched.clone(),
+                rendered: crate::discord::types::render_messages(&[RenderedMessage::from(&message)]),
+            });
+        }
+
+        let Some(store) = &self.mention_store else {
+            tracing::warn!("mention gateway mode is enabled without a mention store");
+            return;
+        };
 
         let mention = NewMention {
             message_id: message.id.to_string(),
@@ -517,6 +539,10 @@ fn matched_terms(message: &Message, bot_user_id: UserId, keywords: &[String]) ->
     let mut matched = Vec::new();
     if message.mentions.iter().any(|user| user.id == bot_user_id) {
         matched.push("mention".to_string());
+    }
+    // replying to koma IS addressing koma (settled 2026-09-07)
+    if message.referenced_message.as_ref().is_some_and(|parent| parent.author.id == bot_user_id) {
+        matched.push("reply".to_string());
     }
 
     let content = message.content.to_lowercase();

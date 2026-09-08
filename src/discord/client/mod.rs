@@ -104,6 +104,10 @@ impl DiscordClient {
         Ok(channel_id.send_message(&self.http, builder).await?)
     }
 
+    pub async fn broadcast_typing(&self, channel_id: ChannelId) -> Result<()> {
+        Ok(self.http.broadcast_typing(channel_id).await?)
+    }
+
     pub async fn user(&self, user_id: UserId) -> Result<User> {
         Ok(self.http.get_user(user_id).await?)
     }
