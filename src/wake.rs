@@ -4,6 +4,7 @@ use std::time::Duration;
 use hmac::{Hmac, Mac};
 use serde::Serialize;
 use serenity::http::Http;
+use serenity::model::channel::Channel;
 use serenity::model::id::ChannelId;
 use sha2::Sha256;
 
@@ -17,6 +18,7 @@ pub struct WakeTap {
     pub author_name: String,
     pub matched_terms: Vec<String>,
     pub rendered: String,
+    pub dm: bool,
 }
 
 #[derive(Clone)]
@@ -66,7 +68,8 @@ async fn channel_name(http: &Http, channel_id: &str) -> String {
     let fallback = || channel_id.to_string();
     let Ok(id) = channel_id.parse::<u64>() else { return fallback() };
     match tokio::time::timeout(Duration::from_secs(2), http.get_channel(ChannelId::new(id))).await {
-        Ok(Ok(channel)) => channel.guild().map_or_else(fallback, |channel| channel.name),
+        Ok(Ok(Channel::Guild(channel))) => channel.name,
+        Ok(Ok(Channel::Private(channel))) => format!("@{}", channel.recipient.name),
         _ => fallback(),
     }
 }

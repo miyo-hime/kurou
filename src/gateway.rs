@@ -32,6 +32,7 @@ pub struct GatewayConfig {
     // guild they both see the message, so only its owner records it - else we double up.
     pub broadcast_guilds: Vec<GuildId>,
     pub wake: Option<WakeSender>,
+    pub wake_dm_from: Vec<UserId>,
 }
 
 pub fn spawn_gateway(token: String, config: GatewayConfig) -> Option<JoinHandle<()>> {
@@ -78,6 +79,9 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
     if config.modlog.is_some() {
         intents |= GatewayIntents::GUILDS | GatewayIntents::GUILD_MODERATION | GatewayIntents::GUILD_MEMBERS;
     }
+    if config.mode == GatewayMode::Mentions && config.wake.is_some() && !config.wake_dm_from.is_empty() {
+        intents |= GatewayIntents::DIRECT_MESSAGES;
+    }
 
     let handler = Handler {
         mode: config.mode,
@@ -92,6 +96,7 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         fanout: config.fanout,
         broadcast_guilds: config.broadcast_guilds,
         wake: config.wake,
+        wake_dm_from: config.wake_dm_from,
     };
     let mut client = Client::builder(token, intents)
         .event_handler(handler)
@@ -122,6 +127,7 @@ struct Handler {
     fanout: Option<WallFanout>,
     broadcast_guilds: Vec<GuildId>,
     wake: Option<WakeSender>,
+    wake_dm_from: Vec<UserId>,
 }
 
 // who pulled the trigger. the ban event itself never says - the answer lives in the
@@ -467,6 +473,27 @@ impl EventHandler for Handler {
         if message.author.id == self.bot_user_id {
             return;
         }
+        // the private wire inverts the guild doctrine: DMs are the open internet, so
+        // only allowlisted senders tap, and their every message is a turn - no keyword.
+        // nothing else touches a DM: no archive row, no mention row, no wall.
+        if message.guild_id.is_none() {
+            if let Some(wake) = &self.wake
+                && self.wake_dm_from.contains(&message.author.id)
+            {
+                wake.tap(ctx.http.clone(), WakeTap {
+                    channel_id: message.channel_id.to_string(),
+                    channel_name: String::new(),
+                    message_id: message.id.to_string(),
+                    ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|now| now.as_secs()).unwrap_or(0),
+                    author_id: message.author.id.to_string(),
+                    author_name: message.author.name.clone(),
+                    matched_terms: Vec::new(),
+                    rendered: crate::discord::types::render_messages(&[RenderedMessage::from(&message)]),
+                    dm: true,
+                });
+            }
+            return;
+        }
         if self
             .default_guild
             .is_some_and(|guild| message.guild_id != Some(guild))
@@ -493,6 +520,7 @@ impl EventHandler for Handler {
                 author_name: message.author.name.clone(),
                 matched_terms: matched.clone(),
                 rendered: crate::discord::types::render_messages(&[RenderedMessage::from(&message)]),
+                dm: false,
             });
         }
 

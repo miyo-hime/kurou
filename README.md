@@ -274,6 +274,9 @@ TRANSPORT=http
 | `GATEWAY_MODE` | `--gateway-mode` | `off` | `off`, `presence`, or `mentions` |
 | `MENTION_DB_PATH` | `--mention-db-path` | `mentions.sqlite3` | sqlite file used by `GATEWAY_MODE=mentions` |
 | `MENTION_KEYWORDS` | `--mention-keyword` | `koma` | comma-separated keyword list for the mention inbox |
+| `WAKE_URL` | `--wake-url` | none | perch endpoint; every koma-sighting in the primary guild POSTs here, HMAC-signed. travels with `WAKE_SECRET` or stays off |
+| `WAKE_SECRET` | `--wake-secret` | none | shared HMAC key for the wake-tap |
+| `WAKE_DM_FROM` | `--wake-dm-from` | empty | comma-separated user ids whose DMs tap the perch (every message, no keyword). empty = DMs are never even heard |
 | `RUST_LOG` | n/a | unset | try `kurou=info` when something's quiet |
 
 ## the un-summonable thing

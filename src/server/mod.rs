@@ -23,7 +23,7 @@ use rmcp::{
         },
     },
 };
-use serenity::model::id::GuildId;
+use serenity::model::id::{GuildId, UserId};
 use tokio_util::sync::CancellationToken;
 
 use crate::archive::MessageStore;
@@ -147,7 +147,7 @@ impl KurouServer {
 #[tool_handler(
     router = self.tool_router,
     name = "kurou",
-    version = "0.17.0",
+    version = "0.18.0",
     instructions = "a small window into a discord server. crow on the wire. reads: list_servers, get_server_info, list_channels (the guild's custom emoji and sticker names ride along - they're the server's culture, reach for them when they fit), list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). archive: search_messages (full-text search the local message archive, needs ARCHIVE=true). voice: send_message (guild stickers may ride along via sticker_ids), typing (raise the indicator as your own bot, one shot), get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. mod ledger: check_ledger, user_history - the crow's moderation memory, every action it witnessed or performed. mod hands (primary guild only, caller's own bot, intent required, every act recorded): ban_user, unban_user, kick_user, timeout_user, untimeout_user, warn_user, revoke_warn, add_role, remove_role, set_nickname, delete_message, lock_channel, unlock_channel, set_slowmode, purge_channel, delete_invite; get_bans and list_invites are open reads. the watcher also records what other moderators do: bans, unbans, kicks, timeouts, joins and leaves land as observed ledger rows. read-only secondary guilds ride a separate observer bot, routed for you. multi-identity: every caller is a labeled bearer - reads are open to all sisters, send_message and the mod hands act with the caller's own bot voice or refuse, and the mention inbox answers only to koma."
 )]
 impl ServerHandler for KurouServer {}
@@ -201,6 +201,7 @@ pub async fn run_stdio(config: Config) -> Result<()> {
             fanout: None,
             broadcast_guilds: Vec::new(),
             wake: crate::wake::WakeSender::from_config(config.wake_url.as_deref(), config.wake_secret.as_deref()),
+            wake_dm_from: parse_wake_dm_from(&config.wake_dm_from),
         },
     );
 
@@ -320,6 +321,7 @@ pub async fn run_http(config: Config) -> Result<()> {
             fanout: primary_fanout,
             broadcast_guilds: default_guild.into_iter().collect(),
             wake: crate::wake::WakeSender::from_config(config.wake_url.as_deref(), config.wake_secret.as_deref()),
+            wake_dm_from: parse_wake_dm_from(&config.wake_dm_from),
         },
     );
 
@@ -353,6 +355,7 @@ pub async fn run_http(config: Config) -> Result<()> {
                 broadcast_guilds: observer.guilds.clone(),
                 // the observer never taps - the perch answers to the primary guild only
                 wake: None,
+                wake_dm_from: Vec::new(),
             },
         ),
         _ => None,
@@ -539,6 +542,14 @@ fn build_modlog_notifier(config: &Config, token: &str) -> Result<Option<crate::m
         .parse::<u64>()
         .with_context(|| format!("MODLOG_CHANNEL '{raw}' is not a valid channel snowflake"))?;
     Ok(Some(crate::modlog::Notifier { client: DiscordClient::new(token), channel: serenity::model::id::ChannelId::new(id) }))
+}
+
+// a typo here would kill the summons silently, so bad ids get a warning, not a shrug
+fn parse_wake_dm_from(ids: &[String]) -> Vec<UserId> {
+    ids.iter().map(|id| id.trim()).filter(|id| !id.is_empty()).filter_map(|id| match id.parse::<u64>() {
+        Ok(id) => Some(UserId::new(id)),
+        Err(_) => { tracing::warn!(id, "WAKE_DM_FROM entry is not a user id snowflake; skipped"); None }
+    }).collect()
 }
 
 fn parse_guild_id(raw: &str) -> Result<GuildId> {

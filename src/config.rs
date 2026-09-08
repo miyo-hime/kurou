@@ -111,6 +111,12 @@ pub struct Config {
 
     #[arg(long = "wake-secret", env = "WAKE_SECRET")]
     pub wake_secret: Option<String>,
+
+    // the private wire: DMs from these user ids tap the perch, every message a turn, no
+    // keyword needed. allowlist-first on purpose - the guild is a curated room, DMs are
+    // the open internet. empty = the crow doesn't even subscribe to DM events.
+    #[arg(long = "wake-dm-from", env = "WAKE_DM_FROM", value_delimiter = ',')]
+    pub wake_dm_from: Vec<String>,
 }
 
 // the sisters' own voices: DISCORD_TOKEN_MECHA=... gives the caller labeled 'mecha' her own
