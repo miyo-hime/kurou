@@ -30,12 +30,6 @@ pub struct ListThreadsRequest {
     pub guild_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema, Serialize)]
-pub struct ListGuildStickersRequest {
-    #[schemars(description = "guild (server) snowflake id. defaults to DISCORD_GUILD_ID when omitted")]
-    pub guild_id: Option<String>,
-}
-
 #[derive(Serialize)]
 struct GuildExpression {
     name: String,
@@ -62,7 +56,11 @@ impl KurouServer {
     ) -> Result<String, String> {
         let guild = resolve_guild(guild_id, self.default_guild, self.readonly_guilds())?;
         let client = self.client_for_guild(guild);
-        let (channels, emojis, stickers) = tokio::try_join!(client.channels(guild), client.guild_emojis(guild), client.guild_stickers(guild)).map_err(tool_error)?;
+        let (channels, emojis, stickers) = tokio::join!(client.channels(guild), client.guild_emojis(guild), client.guild_stickers(guild));
+        let channels = channels.map_err(tool_error)?;
+        // the primer is an enhancement, never a gate - a failed fetch empties it, the phone book survives
+        let emojis = emojis.unwrap_or_else(|error| { tracing::warn!(error = format!("{error:#}"), "culture primer lost the emojis"); Vec::new() });
+        let stickers = stickers.unwrap_or_else(|error| { tracing::warn!(error = format!("{error:#}"), "culture primer lost the stickers"); Vec::new() });
         let channels = channels.into_iter().filter(|channel| kind_matches(&channel.kind, kinds.as_deref())).map(ChannelInfo::from).collect();
         let emojis = emojis.into_iter().map(|emoji| GuildExpression { name: emoji.name, id: emoji.id.to_string() }).collect();
         let stickers = stickers.into_iter().map(|sticker| GuildExpression { name: sticker.name, id: sticker.id.to_string() }).collect();
@@ -72,20 +70,6 @@ impl KurouServer {
             stickers,
             culture_hint: "Custom emojis and stickers are part of this server's social culture. Reach for them when they fit.",
         })
-    }
-
-    #[tool(
-        name = "list_guild_stickers",
-        description = "List a Discord guild's custom stickers by name and id. Pass an id as sticker_ids in send_message to send it."
-    )]
-    pub async fn list_guild_stickers(
-        &self,
-        Parameters(ListGuildStickersRequest { guild_id }): Parameters<ListGuildStickersRequest>,
-    ) -> Result<String, String> {
-        let guild = resolve_guild(guild_id, self.default_guild, self.readonly_guilds())?;
-        let stickers = self.client_for_guild(guild).guild_stickers(guild).await.map_err(tool_error)?;
-        let stickers: Vec<GuildExpression> = stickers.into_iter().map(|sticker| GuildExpression { name: sticker.name, id: sticker.id.to_string() }).collect();
-        json_text(&stickers)
     }
 
     #[tool(
