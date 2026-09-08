@@ -91,6 +91,10 @@ impl DiscordClient {
             .map(|c| c.guild_id))
     }
 
+    pub async fn dm_recipient(&self, channel_id: ChannelId) -> Result<Option<UserId>> {
+        Ok(self.http.get_channel(channel_id).await?.private().map(|c| c.recipient.id))
+    }
+
     pub async fn send_message(
         &self,
         channel_id: ChannelId,

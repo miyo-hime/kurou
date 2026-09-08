@@ -86,7 +86,7 @@ impl KurouServer {
 
 impl KurouServer {
     // the mouth's gate: when read-only secondaries exist, send_message may only land in
-    // the primary guild. resolve the channel's guild and refuse anything else.
+    // the primary guild or a WAKE_DM_FROM recipient's DM. everything else is refused.
     pub(crate) async fn guard_send_target(&self, channel: serenity::model::id::ChannelId) -> Result<(), String> {
         if self.readonly_guilds().is_empty() {
             return Ok(());
@@ -98,6 +98,13 @@ impl KurouServer {
         // (it's in a secondary), so treat "can't verify" as "not primary" and refuse.
         match self.client.channel_guild(channel).await {
             Ok(Some(guild)) if guild == primary => Ok(()),
+            // the private door swings both ways, but only for named knocks
+            Ok(None) => match self.client.dm_recipient(channel).await {
+                Ok(Some(user)) if self.wake_dm_from.contains(&user) => Ok(()),
+                _ => Err(format!(
+                    "refusing to send: channel {channel} is a DM outside WAKE_DM_FROM; the private wire only speaks to named recipients"
+                )),
+            },
             _ => Err(format!(
                 "refusing to send: channel {channel} is not in the primary guild ({primary}); secondaries are read-only"
             )),

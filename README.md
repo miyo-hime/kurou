@@ -260,7 +260,7 @@ TRANSPORT=http
 | env var | cli flag | default | notes |
 |---|---|---|---|
 | `DISCORD_TOKEN` | `--discord-token` | none | required; the bot token |
-| `DISCORD_GUILD_ID` | `--discord-guild-id` | none | default + primary guild; the only place `send_message` may post |
+| `DISCORD_GUILD_ID` | `--discord-guild-id` | none | default + primary guild; `send_message` posts here and nowhere else, save `WAKE_DM_FROM` DMs |
 | `READONLY_GUILDS` | `--readonly-guild` | empty | comma-separated guild ids the crow may read but never post in |
 | `READONLY_DISCORD_TOKEN` | `--readonly-token` | none | observer bot token for the read-only guilds; required when `READONLY_GUILDS` is set |
 | `TRANSPORT` | `--transport` | `stdio` | `stdio` or `http` |
@@ -276,7 +276,7 @@ TRANSPORT=http
 | `MENTION_KEYWORDS` | `--mention-keyword` | `koma` | comma-separated keyword list for the mention inbox |
 | `WAKE_URL` | `--wake-url` | none | perch endpoint; every koma-sighting in the primary guild POSTs here, HMAC-signed. travels with `WAKE_SECRET` or stays off |
 | `WAKE_SECRET` | `--wake-secret` | none | shared HMAC key for the wake-tap |
-| `WAKE_DM_FROM` | `--wake-dm-from` | empty | comma-separated user ids whose DMs tap the perch (every message, no keyword). empty = DMs are never even heard |
+| `WAKE_DM_FROM` | `--wake-dm-from` | empty | comma-separated user ids on the private wire: their DMs tap the perch (every message, no keyword) and their DM channels may be read and answered. empty = DMs are never even heard |
 | `RUST_LOG` | n/a | unset | try `kurou=info` when something's quiet |
 
 ## the un-summonable thing
