@@ -33,6 +33,22 @@ pub struct GatewayConfig {
     pub broadcast_guilds: Vec<GuildId>,
     pub wake: Option<WakeSender>,
     pub wake_dm_from: Vec<UserId>,
+    pub presence: Option<PresenceSlot>,
+}
+
+/// filled at ready, read by the set_presence tool. when the slot is wired the
+/// perch owns the dot: this gateway identifies invisible and never touches it again
+pub type PresenceSlot = std::sync::Arc<std::sync::Mutex<Option<PresenceHandle>>>;
+
+pub struct PresenceHandle {
+    pub ctx: Context,
+    pub bot_id: UserId,
+}
+
+impl std::fmt::Debug for PresenceHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PresenceHandle({})", self.bot_id)
+    }
 }
 
 pub fn spawn_gateway(token: String, config: GatewayConfig) -> Option<JoinHandle<()>> {
@@ -97,6 +113,7 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         broadcast_guilds: config.broadcast_guilds,
         wake: config.wake,
         wake_dm_from: config.wake_dm_from,
+        presence: config.presence,
     };
     let mut client = Client::builder(token, intents)
         .event_handler(handler)
@@ -128,6 +145,7 @@ struct Handler {
     broadcast_guilds: Vec<GuildId>,
     wake: Option<WakeSender>,
     wake_dm_from: Vec<UserId>,
+    presence: Option<PresenceSlot>,
 }
 
 // who pulled the trigger. the ban event itself never says - the answer lives in the
@@ -278,7 +296,13 @@ impl Handler {
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
-        ctx.set_presence(None, OnlineStatus::Online);
+        match &self.presence {
+            Some(slot) => {
+                ctx.set_presence(None, OnlineStatus::Invisible);
+                *slot.lock().unwrap() = Some(PresenceHandle { ctx: ctx.clone(), bot_id: ready.user.id });
+            }
+            None => ctx.set_presence(None, OnlineStatus::Online),
+        }
         tracing::info!(
             user = %ready.user.name,
             user_id = %ready.user.id,

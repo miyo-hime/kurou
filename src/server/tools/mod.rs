@@ -6,6 +6,7 @@ pub mod info;
 pub mod mentions;
 pub mod messages;
 pub mod modlog;
+pub mod presence;
 pub mod raid;
 pub mod scan;
 pub mod send;
