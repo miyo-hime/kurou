@@ -9,7 +9,7 @@ use serenity::model::id::StickerId;
 use crate::discord::AttachmentSource;
 use crate::discord::types::MessageInfo;
 use crate::server::KurouServer;
-use crate::server::tools::common::{caller_identity, json_text, parse_channel, tool_error};
+use crate::server::tools::common::{caller_identity, json_text, parse_channel, parse_message, tool_error};
 
 // discord caps a single message at 10 files. say no here rather than let it bounce.
 const MAX_ATTACHMENTS: usize = 10;
@@ -29,6 +29,10 @@ pub struct SendMessageRequest {
     pub content: String,
     #[schemars(description = "guild sticker snowflake ids, up to 3. stickers may be combined with content and attachments")]
     pub sticker_ids: Option<Vec<String>>,
+    #[schemars(
+        description = "message snowflake id in the same channel to reply to. the send fails if the target no longer exists, so a reply to a ghost bounces instead of landing contextless"
+    )]
+    pub reply_to: Option<String>,
     #[schemars(
         description = "already-hosted http(s) links the crow fetches and attaches. cheapest path; use for anything already on the web"
     )]
@@ -55,7 +59,7 @@ pub struct InlineAttachment {
 impl KurouServer {
     #[tool(
         name = "send_message",
-        description = "Send a message to a Discord channel, optionally with guild stickers and file attachments. Stickers can travel with content and attachments. The message goes out as the calling sister's own bot when she has one configured; without one, sends are refused - the crow's voice is not shared. This changes the server, so use your indoor voice."
+        description = "Send a message to a Discord channel, optionally as a reply to an existing message (reply_to), with guild stickers and file attachments. Stickers can travel with content and attachments. The message goes out as the calling sister's own bot when she has one configured; without one, sends are refused - the crow's voice is not shared. This changes the server, so use your indoor voice."
     )]
     pub async fn send_message(
         &self,
@@ -63,6 +67,7 @@ impl KurouServer {
             channel_id,
             content,
             sticker_ids,
+            reply_to,
             attachment_urls,
             attachment_refs,
             attachments_inline,
@@ -72,12 +77,13 @@ impl KurouServer {
         let sender = self.sender_for(&caller_identity(&extensions)?)?;
         let channel = parse_channel(&channel_id)?;
         let sticker_ids = parse_sticker_ids(sticker_ids)?;
+        let reply_to = reply_to.as_deref().map(parse_message).transpose()?;
         self.guard_send_target(channel).await?;
         let attachments = self.resolve_attachments(attachment_urls, attachment_refs, attachments_inline)?;
         validate_content(&content, attachments.len(), sticker_ids.len())?;
 
         let message = sender
-            .send_message(channel, &content, attachments, sticker_ids)
+            .send_message(channel, &content, attachments, sticker_ids, reply_to)
             .await
             .map_err(tool_error)?;
         json_text(&MessageInfo::from(message))

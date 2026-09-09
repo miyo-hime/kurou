@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serenity::builder::{CreateAttachment, CreateMessage, EditChannel, EditMember};
 use serenity::http::{Http, MessagePagination};
-use serenity::model::channel::{GuildChannel, Message, PermissionOverwrite};
+use serenity::model::channel::{GuildChannel, Message, MessageReference, PermissionOverwrite};
 use serenity::model::guild::{Ban, Emoji, Member, Role};
 use serenity::model::guild::PartialGuild;
 use serenity::model::id::{ChannelId, GuildId, MessageId, StickerId, UserId};
@@ -101,8 +101,12 @@ impl DiscordClient {
         content: &str,
         attachments: Vec<AttachmentSource>,
         sticker_ids: Vec<StickerId>,
+        reply_to: Option<MessageId>,
     ) -> Result<Message> {
         let mut builder = CreateMessage::new();
+        if let Some(target) = reply_to {
+            builder = builder.reference_message(MessageReference::from((channel_id, target)));
+        }
         if !content.is_empty() {
             builder = builder.content(content);
         }
