@@ -15,6 +15,8 @@ pub fn router() -> ToolRouter<KurouServer> {
 pub struct PresenceRequest {
     #[schemars(description = "online, idle, dnd, or invisible")]
     pub status: String,
+    #[schemars(description = "Optional custom status line shown under the bot's name. Omit or send empty to clear it.")]
+    pub text: Option<String>,
 }
 
 #[tool_router(router = presence_router)]
@@ -25,7 +27,7 @@ impl KurouServer {
     )]
     pub async fn set_presence(
         &self,
-        Parameters(PresenceRequest { status }): Parameters<PresenceRequest>,
+        Parameters(PresenceRequest { status, text }): Parameters<PresenceRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
         let status = match status.as_str() {
@@ -40,6 +42,7 @@ impl KurouServer {
         };
         let sender = self.sender_for(&caller_identity(&extensions)?)?;
         let caller_bot = sender.current_user_id().await.map_err(tool_error)?;
+        let text = text.filter(|t| !t.trim().is_empty());
         let handle_status = {
             let slot = slot.lock().unwrap();
             let Some(handle) = slot.as_ref() else {
@@ -48,9 +51,9 @@ impl KurouServer {
             if handle.bot_id != caller_bot {
                 return Err("the dot belongs to the primary bot, and your voice is not it".to_string());
             }
-            handle.ctx.set_presence(None, status);
+            handle.ctx.set_presence(text.clone().map(serenity::gateway::ActivityData::custom), status);
             format!("{status:?}")
         };
-        json_text(&serde_json::json!({ "presence": handle_status.to_lowercase() }))
+        json_text(&serde_json::json!({ "presence": handle_status.to_lowercase(), "text": text }))
     }
 }
