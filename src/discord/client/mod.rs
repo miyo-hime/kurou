@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serenity::builder::{CreateAttachment, CreateMessage, EditChannel, EditMember};
 use serenity::http::{Http, MessagePagination};
-use serenity::model::channel::{GuildChannel, Message, MessageReference, PermissionOverwrite};
+use serenity::model::channel::{GuildChannel, Message, MessageReference, PermissionOverwrite, ReactionType};
 use serenity::model::guild::{Ban, Emoji, Member, Role};
 use serenity::model::guild::PartialGuild;
 use serenity::model::id::{ChannelId, GuildId, MessageId, StickerId, UserId};
@@ -127,6 +127,14 @@ impl DiscordClient {
 
     pub async fn broadcast_typing(&self, channel_id: ChannelId) -> Result<()> {
         Ok(self.http.broadcast_typing(channel_id).await?)
+    }
+
+    pub async fn react(&self, channel_id: ChannelId, message_id: MessageId, reaction: &ReactionType) -> Result<()> {
+        Ok(self.http.create_reaction(channel_id, message_id, reaction).await?)
+    }
+
+    pub async fn unreact(&self, channel_id: ChannelId, message_id: MessageId, reaction: &ReactionType) -> Result<()> {
+        Ok(self.http.delete_reaction_me(channel_id, message_id, reaction).await?)
     }
 
     pub async fn user(&self, user_id: UserId) -> Result<User> {

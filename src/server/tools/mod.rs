@@ -8,6 +8,7 @@ pub mod messages;
 pub mod modlog;
 pub mod presence;
 pub mod raid;
+pub mod reaction;
 pub mod scan;
 pub mod send;
 pub mod typing;
