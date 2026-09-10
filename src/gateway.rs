@@ -33,9 +33,8 @@ pub struct GatewayConfig {
     // guild they both see the message, so only its owner records it - else we double up.
     pub broadcast_guilds: Vec<GuildId>,
     pub wake: Option<WakeSender>,
-    // routed perches: each named sink hears only its own keywords. the bare wake
-    // sender above stays the default perch - mentions and replies to the crow are
-    // always its bird, because the crow's own face answers as koma.
+    // routed perches: each named sink hears its own bot and keywords. the bare wake
+    // sender above stays the default perch for the crow's own face as koma.
     pub named_sinks: Vec<NamedWakeSink>,
     pub wake_dm_from: Vec<UserId>,
     pub presence: Option<PresenceSlot>,
@@ -525,11 +524,10 @@ impl EventHandler for Handler {
             return;
         }
 
-        let matched = matched_terms(&message, self.bot_user_id, &self.mention_keywords);
+        let matched = matched_terms(&message, Some(self.bot_user_id), &self.mention_keywords);
 
-        // every sighting taps the perch that owns the matched name; authorization is
-        // still tomarigi's job, kurou doesn't grow an allowlist, it grows beak-taps.
-        // a message naming two sisters wakes both - both were named.
+        // every sighting taps the perch that owns the matched voice or name; authorization
+        // is still tomarigi's job. a message naming two sisters wakes both.
         if self.default_guild.is_some() {
             if let Some(wake) = &self.wake
                 && !matched.is_empty()
@@ -537,9 +535,11 @@ impl EventHandler for Handler {
                 wake.tap(ctx.http.clone(), wake_tap(&message, matched.clone(), false));
             }
             if !self.named_sinks.is_empty() {
-                let content = message.content.to_lowercase();
                 for sink in &self.named_sinks {
-                    let sink_matched = sink.matched_terms(&content);
+                    if sink.bot_id.is_some_and(|id| id == message.author.id) {
+                        continue;
+                    }
+                    let sink_matched = matched_terms(&message, sink.bot_id, &sink.keywords);
                     if !sink_matched.is_empty() {
                         tracing::info!(sink = %sink.name, message_id = %message.id, "sighting routed to named perch");
                         sink.sender.tap(ctx.http.clone(), wake_tap(&message, sink_matched, false));
@@ -605,13 +605,12 @@ fn normalize_keywords(keywords: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn matched_terms(message: &Message, bot_user_id: UserId, keywords: &[String]) -> Vec<String> {
+fn matched_terms(message: &Message, bot_id: Option<UserId>, keywords: &[String]) -> Vec<String> {
     let mut matched = Vec::new();
-    if message.mentions.iter().any(|user| user.id == bot_user_id) {
+    if bot_id.is_some_and(|id| message.mentions.iter().any(|user| user.id == id)) {
         matched.push("mention".to_string());
     }
-    // replying to koma IS addressing koma (settled 2026-09-07)
-    if message.referenced_message.as_ref().is_some_and(|parent| parent.author.id == bot_user_id) {
+    if bot_id.is_some_and(|id| message.referenced_message.as_ref().is_some_and(|parent| parent.author.id == id)) {
         matched.push("reply".to_string());
     }
 

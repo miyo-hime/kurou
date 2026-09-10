@@ -73,12 +73,7 @@ pub struct NamedWakeSink {
     pub name: String,
     pub keywords: Vec<String>,
     pub sender: WakeSender,
-}
-
-impl NamedWakeSink {
-    pub fn matched_terms(&self, content_lowercase: &str) -> Vec<String> {
-        self.keywords.iter().filter(|keyword| content_lowercase.contains(keyword.as_str())).cloned().collect()
-    }
+    pub bot_id: Option<serenity::model::id::UserId>,
 }
 
 pub fn named_sinks() -> Vec<NamedWakeSink> {
@@ -116,7 +111,7 @@ fn named_sinks_from(vars: impl Iterator<Item = (String, String)>) -> Vec<NamedWa
                 .map(|raw| raw.split(',').map(|keyword| keyword.trim().to_lowercase()).filter(|keyword| !keyword.is_empty()).collect::<Vec<_>>())
                 .filter(|parsed: &Vec<String>| !parsed.is_empty())
                 .unwrap_or_else(|| vec![name.clone()]);
-            Some(NamedWakeSink { name, keywords, sender })
+            Some(NamedWakeSink { name, keywords, sender, bot_id: None })
         })
         .collect()
 }
@@ -179,9 +174,9 @@ mod tests {
     }
 
     #[test]
-    fn matched_terms_finds_only_its_own_keywords() {
+    fn an_unbound_sink_keeps_matching_keywords() {
         let sinks = named_sinks_from(vars(&[("WAKE_URL_PYONKA", "http://127.0.0.1:7858/wake"), ("WAKE_SECRET_PYONKA", "carrots")]));
-        assert_eq!(sinks[0].matched_terms("hey pyonka, look at this"), vec!["pyonka"]);
-        assert!(sinks[0].matched_terms("hey koma, look at this").is_empty());
+        assert_eq!(sinks[0].bot_id, None);
+        assert_eq!(sinks[0].keywords, vec!["pyonka"]);
     }
 }

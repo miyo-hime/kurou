@@ -23,13 +23,21 @@ pub struct PresenceRequest {
 impl KurouServer {
     #[tool(
         name = "set_presence",
-        description = "Steer the primary bot's presence dot over the crow's own gateway connection. Only a caller whose voice IS the primary bot may steer it, and only when the perch owns the dot (WAKE_URL configured) - otherwise the gateway keeps its own counsel. Discord throttles presence updates, so debounce on your side."
+        description = "Steer your own bot's presence dot over its crow gateway. Koma's dot needs WAKE_URL; each sister's needs her own DISCORD_TOKEN_<LABEL>. Dots start invisible until their caller steers them. Discord throttles presence updates, so debounce on your side."
     )]
     pub async fn set_presence(
         &self,
         Parameters(PresenceRequest { status, text }): Parameters<PresenceRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
+        let identity = caller_identity(&extensions)?;
+        let Some(slot) = self.presence.get(&identity) else {
+            return if identity == "koma" {
+                Err("the dot is not steerable here: no WAKE_URL, so presence stays the gateway's own".to_string())
+            } else {
+                Err(format!("no dot answers to '{identity}': no DISCORD_TOKEN_{} gateway holds one", identity.to_uppercase()))
+            };
+        };
         let status = match status.as_str() {
             "online" => OnlineStatus::Online,
             "idle" => OnlineStatus::Idle,
@@ -37,10 +45,7 @@ impl KurouServer {
             "invisible" => OnlineStatus::Invisible,
             other => return Err(format!("'{other}' is not a presence the dot knows: online, idle, dnd, invisible")),
         };
-        let Some(slot) = &self.presence else {
-            return Err("the dot is not steerable here: no WAKE_URL, so presence stays the gateway's own".to_string());
-        };
-        let sender = self.sender_for(&caller_identity(&extensions)?)?;
+        let sender = self.sender_for(&identity)?;
         let caller_bot = sender.current_user_id().await.map_err(tool_error)?;
         let text = text.filter(|t| !t.trim().is_empty());
         let handle_status = {
@@ -49,7 +54,7 @@ impl KurouServer {
                 return Err("the gateway has not reached ready yet - no dot to steer".to_string());
             };
             if handle.bot_id != caller_bot {
-                return Err("the dot belongs to the primary bot, and your voice is not it".to_string());
+                return Err(format!("the dot wired for '{identity}' belongs to a different bot than your voice"));
             }
             handle.ctx.set_presence(text.clone().map(serenity::gateway::ActivityData::custom), status);
             format!("{status:?}")
