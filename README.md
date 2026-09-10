@@ -288,8 +288,11 @@ TRANSPORT=http
 | `GATEWAY_MODE` | `--gateway-mode` | `off` | `off`, `presence`, or `mentions` |
 | `MENTION_DB_PATH` | `--mention-db-path` | `mentions.sqlite3` | sqlite file used by `GATEWAY_MODE=mentions` |
 | `MENTION_KEYWORDS` | `--mention-keyword` | `koma` | comma-separated keyword list for the mention inbox |
-| `WAKE_URL` | `--wake-url` | none | perch endpoint; every koma-sighting in a writable guild POSTs here, HMAC-signed. travels with `WAKE_SECRET` or stays off |
-| `WAKE_SECRET` | `--wake-secret` | none | shared HMAC key for the wake-tap |
+| `WAKE_URL` | `--wake-url` | none | the default perch: mentions of the crow, replies to it, and every `MENTION_KEYWORDS` sighting in a writable guild POST here, HMAC-signed. travels with `WAKE_SECRET` or stays off |
+| `WAKE_SECRET` | `--wake-secret` | none | shared HMAC key for the default perch's wake-tap |
+| `WAKE_URL_<NAME>` | n/a | none | a routed perch: sightings of `<name>` POST here instead. travels with `WAKE_SECRET_<NAME>` or stays off. a message naming several sisters wakes every matched perch |
+| `WAKE_SECRET_<NAME>` | n/a | none | that perch's own HMAC key - a leaked one can't wake anyone else's bird |
+| `WAKE_KEYWORDS_<NAME>` | n/a | `<name>` | comma-separated keywords that ring the named perch, replacing the name-only default |
 | `WAKE_DM_FROM` | `--wake-dm-from` | empty | comma-separated user ids on the private wire: their DMs tap the perch (every message, no keyword) and their DM channels may be read and answered. empty = DMs are never even heard |
 | `RUST_LOG` | n/a | unset | try `kurou=info` when something's quiet |
 

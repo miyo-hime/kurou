@@ -64,6 +64,63 @@ impl WakeSender {
     }
 }
 
+// a routed perch: WAKE_URL_PYONKA + WAKE_SECRET_PYONKA grow a sink named "pyonka"
+// whose keyword defaults to its own name. WAKE_KEYWORDS_PYONKA widens the net.
+// the bare WAKE_URL/WAKE_SECRET pair stays the default perch for mentions and
+// replies to the crow itself - a new bird is two env vars, never a code change.
+#[derive(Clone)]
+pub struct NamedWakeSink {
+    pub name: String,
+    pub keywords: Vec<String>,
+    pub sender: WakeSender,
+}
+
+impl NamedWakeSink {
+    pub fn matched_terms(&self, content_lowercase: &str) -> Vec<String> {
+        self.keywords.iter().filter(|keyword| content_lowercase.contains(keyword.as_str())).cloned().collect()
+    }
+}
+
+pub fn named_sinks() -> Vec<NamedWakeSink> {
+    named_sinks_from(std::env::vars())
+}
+
+fn named_sinks_from(vars: impl Iterator<Item = (String, String)>) -> Vec<NamedWakeSink> {
+    let mut urls = std::collections::BTreeMap::new();
+    let mut secrets = std::collections::BTreeMap::new();
+    let mut keywords = std::collections::BTreeMap::new();
+    for (key, value) in vars {
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+        if let Some(name) = key.strip_prefix("WAKE_URL_").filter(|name| !name.is_empty()) {
+            urls.insert(name.to_lowercase(), value);
+        } else if let Some(name) = key.strip_prefix("WAKE_SECRET_").filter(|name| !name.is_empty()) {
+            secrets.insert(name.to_lowercase(), value);
+        } else if let Some(name) = key.strip_prefix("WAKE_KEYWORDS_").filter(|name| !name.is_empty()) {
+            keywords.insert(name.to_lowercase(), value);
+        }
+    }
+    let names: std::collections::BTreeSet<String> = urls.keys().chain(secrets.keys()).cloned().collect();
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let (Some(url), Some(secret)) = (urls.get(&name), secrets.get(&name)) else {
+                tracing::warn!(sink = %name, "WAKE_URL_{0} and WAKE_SECRET_{0} travel together; this sink stays off", name.to_uppercase());
+                return None;
+            };
+            let sender = WakeSender::from_config(Some(url), Some(secret))?;
+            let keywords = keywords
+                .get(&name)
+                .map(|raw| raw.split(',').map(|keyword| keyword.trim().to_lowercase()).filter(|keyword| !keyword.is_empty()).collect::<Vec<_>>())
+                .filter(|parsed: &Vec<String>| !parsed.is_empty())
+                .unwrap_or_else(|| vec![name.clone()]);
+            Some(NamedWakeSink { name, keywords, sender })
+        })
+        .collect()
+}
+
 async fn channel_name(http: &Http, channel_id: &str) -> String {
     let fallback = || channel_id.to_string();
     let Ok(id) = channel_id.parse::<u64>() else { return fallback() };
@@ -80,10 +137,51 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::hex;
+    use super::{hex, named_sinks_from};
+
+    fn vars(pairs: &[(&str, &str)]) -> std::vec::IntoIter<(String, String)> {
+        pairs.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect::<Vec<_>>().into_iter()
+    }
 
     #[test]
     fn hex_matches_the_perch_dialect() {
         assert_eq!(hex(&[0x00, 0xab, 0x0f]), "00ab0f");
+    }
+
+    #[test]
+    fn a_full_pair_grows_a_sink_named_after_its_suffix() {
+        let sinks = named_sinks_from(vars(&[("WAKE_URL_PYONKA", "http://127.0.0.1:7858/wake"), ("WAKE_SECRET_PYONKA", "carrots")]));
+        assert_eq!(sinks.len(), 1);
+        assert_eq!(sinks[0].name, "pyonka");
+        assert_eq!(sinks[0].keywords, vec!["pyonka"]);
+    }
+
+    #[test]
+    fn a_lone_url_or_secret_stays_off() {
+        assert!(named_sinks_from(vars(&[("WAKE_URL_PYONKA", "http://127.0.0.1:7858/wake")])).is_empty());
+        assert!(named_sinks_from(vars(&[("WAKE_SECRET_PYONKA", "carrots")])).is_empty());
+    }
+
+    #[test]
+    fn custom_keywords_replace_the_name_and_normalize() {
+        let sinks = named_sinks_from(vars(&[
+            ("WAKE_URL_PYONKA", "http://127.0.0.1:7858/wake"),
+            ("WAKE_SECRET_PYONKA", "carrots"),
+            ("WAKE_KEYWORDS_PYONKA", " Pyonka, MIMI ,,"),
+        ]));
+        assert_eq!(sinks[0].keywords, vec!["pyonka", "mimi"]);
+    }
+
+    #[test]
+    fn the_bare_pair_and_unrelated_vars_grow_nothing() {
+        let sinks = named_sinks_from(vars(&[("WAKE_URL", "http://127.0.0.1:7857/wake"), ("WAKE_SECRET", "seeds"), ("WAKE_DM_FROM", "1,2")]));
+        assert!(sinks.is_empty());
+    }
+
+    #[test]
+    fn matched_terms_finds_only_its_own_keywords() {
+        let sinks = named_sinks_from(vars(&[("WAKE_URL_PYONKA", "http://127.0.0.1:7858/wake"), ("WAKE_SECRET_PYONKA", "carrots")]));
+        assert_eq!(sinks[0].matched_terms("hey pyonka, look at this"), vec!["pyonka"]);
+        assert!(sinks[0].matched_terms("hey koma, look at this").is_empty());
     }
 }

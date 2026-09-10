@@ -13,7 +13,7 @@ use crate::config::GatewayMode;
 use crate::discord::types::{RenderedMessage, display_name};
 use crate::mentions::{MentionStore, NewMention};
 use crate::modlog::{ModlogStore, NewModAction, Source};
-use crate::wake::{WakeSender, WakeTap};
+use crate::wake::{NamedWakeSink, WakeSender, WakeTap};
 use crate::wall::event::{WallFanout, enrich};
 
 #[derive(Clone)]
@@ -33,6 +33,10 @@ pub struct GatewayConfig {
     // guild they both see the message, so only its owner records it - else we double up.
     pub broadcast_guilds: Vec<GuildId>,
     pub wake: Option<WakeSender>,
+    // routed perches: each named sink hears only its own keywords. the bare wake
+    // sender above stays the default perch - mentions and replies to the crow are
+    // always its bird, because the crow's own face answers as koma.
+    pub named_sinks: Vec<NamedWakeSink>,
     pub wake_dm_from: Vec<UserId>,
     pub presence: Option<PresenceSlot>,
 }
@@ -114,6 +118,7 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         fanout: config.fanout,
         broadcast_guilds: config.broadcast_guilds,
         wake: config.wake,
+        named_sinks: config.named_sinks,
         wake_dm_from: config.wake_dm_from,
         presence: config.presence,
     };
@@ -147,6 +152,7 @@ struct Handler {
     fanout: Option<WallFanout>,
     broadcast_guilds: Vec<GuildId>,
     wake: Option<WakeSender>,
+    named_sinks: Vec<NamedWakeSink>,
     wake_dm_from: Vec<UserId>,
     presence: Option<PresenceSlot>,
 }
@@ -507,17 +513,7 @@ impl EventHandler for Handler {
             if let Some(wake) = &self.wake
                 && self.wake_dm_from.contains(&message.author.id)
             {
-                wake.tap(ctx.http.clone(), WakeTap {
-                    channel_id: message.channel_id.to_string(),
-                    channel_name: String::new(),
-                    message_id: message.id.to_string(),
-                    ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|now| now.as_secs()).unwrap_or(0),
-                    author_id: message.author.id.to_string(),
-                    author_name: message.author.name.clone(),
-                    matched_terms: Vec::new(),
-                    rendered: crate::discord::types::render_messages(&[RenderedMessage::from(&message)]),
-                    dm: true,
-                });
+                wake.tap(ctx.http.clone(), wake_tap(&message, Vec::new(), true));
             }
             return;
         }
@@ -530,26 +526,30 @@ impl EventHandler for Handler {
         }
 
         let matched = matched_terms(&message, self.bot_user_id, &self.mention_keywords);
-        if matched.is_empty() {
-            return;
+
+        // every sighting taps the perch that owns the matched name; authorization is
+        // still tomarigi's job, kurou doesn't grow an allowlist, it grows beak-taps.
+        // a message naming two sisters wakes both - both were named.
+        if self.default_guild.is_some() {
+            if let Some(wake) = &self.wake
+                && !matched.is_empty()
+            {
+                wake.tap(ctx.http.clone(), wake_tap(&message, matched.clone(), false));
+            }
+            if !self.named_sinks.is_empty() {
+                let content = message.content.to_lowercase();
+                for sink in &self.named_sinks {
+                    let sink_matched = sink.matched_terms(&content);
+                    if !sink_matched.is_empty() {
+                        tracing::info!(sink = %sink.name, message_id = %message.id, "sighting routed to named perch");
+                        sink.sender.tap(ctx.http.clone(), wake_tap(&message, sink_matched, false));
+                    }
+                }
+            }
         }
 
-        // every koma-sighting taps the perch; authorization is tomarigi's job, kurou
-        // doesn't grow an allowlist, it grows a beak-tap
-        if let Some(wake) = &self.wake
-            && self.default_guild.is_some()
-        {
-            wake.tap(ctx.http.clone(), WakeTap {
-                channel_id: message.channel_id.to_string(),
-                channel_name: String::new(),
-                message_id: message.id.to_string(),
-                ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|now| now.as_secs()).unwrap_or(0),
-                author_id: message.author.id.to_string(),
-                author_name: message.author.name.clone(),
-                matched_terms: matched.clone(),
-                rendered: crate::discord::types::render_messages(&[RenderedMessage::from(&message)]),
-                dm: false,
-            });
+        if matched.is_empty() {
+            return;
         }
 
         let Some(store) = &self.mention_store else {
@@ -580,6 +580,20 @@ impl EventHandler for Handler {
             Ok(false) => {}
             Err(error) => tracing::error!(error = format!("{error:#}"), "failed to store mention"),
         }
+    }
+}
+
+fn wake_tap(message: &Message, matched_terms: Vec<String>, dm: bool) -> WakeTap {
+    WakeTap {
+        channel_id: message.channel_id.to_string(),
+        channel_name: String::new(),
+        message_id: message.id.to_string(),
+        ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|now| now.as_secs()).unwrap_or(0),
+        author_id: message.author.id.to_string(),
+        author_name: message.author.name.clone(),
+        matched_terms,
+        rendered: crate::discord::types::render_messages(&[RenderedMessage::from(message)]),
+        dm,
     }
 }
 

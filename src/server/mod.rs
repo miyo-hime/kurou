@@ -238,6 +238,7 @@ pub async fn run_stdio(config: Config) -> Result<()> {
             fanout: None,
             broadcast_guilds: Vec::new(),
             wake: crate::wake::WakeSender::from_config(config.wake_url.as_deref(), config.wake_secret.as_deref()),
+            named_sinks: crate::wake::named_sinks(),
             wake_dm_from: parse_wake_dm_from(&config.wake_dm_from),
             presence: presence_slot.clone(),
         },
@@ -362,6 +363,7 @@ pub async fn run_http(config: Config) -> Result<()> {
             // the primary bot lives in the secondaries too, so this gateway carries them
             broadcast_guilds: default_guild.into_iter().chain(topology.secondary.iter().copied()).collect(),
             wake: crate::wake::WakeSender::from_config(config.wake_url.as_deref(), config.wake_secret.as_deref()),
+            named_sinks: crate::wake::named_sinks(),
             wake_dm_from: parse_wake_dm_from(&config.wake_dm_from),
             presence: presence_slot.clone(),
         },
@@ -396,8 +398,9 @@ pub async fn run_http(config: Config) -> Result<()> {
                     tx: wall_tx.clone(),
                 }),
                 broadcast_guilds: observer.guilds.clone(),
-                // the observer never taps - the perch answers to the primary guild only
+                // the observer never taps - the perches answer to writable guilds only
                 wake: None,
+                named_sinks: Vec::new(),
                 wake_dm_from: Vec::new(),
                 presence: None,
             },
