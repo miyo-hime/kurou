@@ -20,6 +20,7 @@ use crate::wall::event::{WallFanout, enrich};
 pub struct GatewayConfig {
     pub mode: GatewayMode,
     pub default_guild: Option<GuildId>,
+    pub secondary_guilds: Vec<GuildId>,
     pub mention_keywords: Vec<String>,
     pub mention_store: Option<MentionStore>,
     pub archive: Option<MessageStore>,
@@ -103,6 +104,7 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         mode: config.mode,
         bot_user_id,
         default_guild: config.default_guild,
+        secondary_guilds: config.secondary_guilds,
         mention_keywords: normalize_keywords(config.mention_keywords),
         mention_store: config.mention_store,
         archive: config.archive,
@@ -132,6 +134,7 @@ struct Handler {
     mode: GatewayMode,
     bot_user_id: UserId,
     default_guild: Option<GuildId>,
+    secondary_guilds: Vec<GuildId>,
     mention_keywords: Vec<String>,
     mention_store: Option<MentionStore>,
     archive: Option<MessageStore>,
@@ -518,10 +521,11 @@ impl EventHandler for Handler {
             }
             return;
         }
-        if self
-            .default_guild
-            .is_some_and(|guild| message.guild_id != Some(guild))
-        {
+        // mentions and wake taps ring across every writable guild, primary and secondary
+        let in_writable_guild = self.default_guild.is_none()
+            || message.guild_id == self.default_guild
+            || message.guild_id.is_some_and(|guild| self.secondary_guilds.contains(&guild));
+        if !in_writable_guild {
             return;
         }
 

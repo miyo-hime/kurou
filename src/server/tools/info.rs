@@ -37,7 +37,7 @@ impl KurouServer {
         &self,
         Parameters(ServerInfoRequest { guild_id }): Parameters<ServerInfoRequest>,
     ) -> Result<String, String> {
-        let guild = resolve_guild(guild_id, self.default_guild, self.readonly_guilds())?;
+        let guild = resolve_guild(guild_id, self.default_guild, &self.secondary_guilds, self.readonly_guilds())?;
         let info = self
             .client_for_guild(guild)
             .server_info(guild)
@@ -48,13 +48,14 @@ impl KurouServer {
 
     #[tool(
         name = "list_servers",
-        description = "List the guilds the crow can read, each tagged primary (writable) or readonly (watch-only, a separate observer bot). Use this to learn which guild_id is which before reading across servers."
+        description = "List the guilds the crow can read, each tagged primary (the home guild and default reach - when asked to check a message or channel with no server named, look here first), secondary (also writable), or readonly (watch-only, a separate observer bot). Use this to learn which guild_id is which before reading across servers."
     )]
     pub async fn list_servers(&self) -> Result<String, String> {
         let targets = self
             .default_guild
             .iter()
             .map(|g| (*g, "primary"))
+            .chain(self.secondary_guilds.iter().map(|g| (*g, "secondary")))
             .chain(self.readonly_guilds().iter().map(|g| (*g, "readonly")));
         let mut entries: Vec<ServerEntry> = Vec::new();
         for (guild, role) in targets {

@@ -38,13 +38,18 @@ pub struct ClientPool {
     pub client: DiscordClient,
     pub readonly_client: Option<DiscordClient>,
     pub default_guild: Option<GuildId>,
+    pub secondary_guilds: Vec<GuildId>,
     pub readonly_guilds: Vec<GuildId>,
 }
 
 impl ClientPool {
+    fn is_writable(&self, guild: GuildId) -> bool {
+        self.default_guild == Some(guild) || self.secondary_guilds.contains(&guild)
+    }
+
     fn client_for_guild(&self, guild: GuildId) -> &DiscordClient {
         match &self.readonly_client {
-            Some(observer) if Some(guild) != self.default_guild => observer,
+            Some(observer) if !self.is_writable(guild) => observer,
             _ => &self.client,
         }
     }
@@ -54,7 +59,8 @@ impl ClientPool {
             return &self.client;
         };
         match self.client.channel_guild(channel).await {
-            Ok(guild) if guild == self.default_guild => &self.client,
+            Ok(Some(guild)) if self.is_writable(guild) => &self.client,
+            Ok(None) => &self.client,
             _ => observer,
         }
     }
@@ -64,6 +70,7 @@ impl ClientPool {
         if let Some(primary) = self.default_guild {
             out.push((primary, "primary"));
         }
+        out.extend(self.secondary_guilds.iter().map(|g| (*g, "secondary")));
         out.extend(self.readonly_guilds.iter().map(|g| (*g, "observer")));
         out
     }

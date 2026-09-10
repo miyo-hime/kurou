@@ -25,11 +25,21 @@ pub struct Config {
     #[arg(long, env = "DISCORD_TOKEN")]
     pub discord_token: Option<String>,
 
+    // the home guild: the default reach when no guild_id is given, the only place the
+    // mod hands work. PRIMARY_GUILD is the name going forward; DISCORD_GUILD_ID still
+    // works so a live unit survives the upgrade. resolve via primary_guild_raw().
+    #[arg(long = "primary-guild", env = "PRIMARY_GUILD")]
+    pub primary_guild: Option<String>,
+
     #[arg(long, env = "DISCORD_GUILD_ID")]
     pub discord_guild_id: Option<String>,
 
-    // servers the crow may read but never speak in. when set, DISCORD_GUILD_ID is the
-    // one place send_message is allowed to land.
+    // more writable guilds beyond the primary: the crow's own bots live there and may
+    // speak, wake taps ring, but the mod hands stay home.
+    #[arg(long = "secondary-guild", env = "SECONDARY_GUILDS", value_delimiter = ',')]
+    pub secondary_guilds: Vec<String>,
+
+    // servers the crow may read but never speak in, watched by the observer bot.
     #[arg(long = "readonly-guild", env = "READONLY_GUILDS", value_delimiter = ',')]
     pub readonly_guilds: Vec<String>,
 
@@ -135,6 +145,14 @@ fn sender_tokens_from(vars: impl Iterator<Item = (String, String)>) -> Vec<(Stri
 }
 
 impl Config {
+    pub fn primary_guild_raw(&self) -> Option<&str> {
+        self.primary_guild
+            .as_deref()
+            .or(self.discord_guild_id.as_deref())
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+    }
+
     pub fn ledger_path(&self) -> PathBuf {
         self.ledger_path
             .clone()

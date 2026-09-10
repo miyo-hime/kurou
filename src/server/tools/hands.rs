@@ -51,7 +51,7 @@ impl Hand<'_> {
 
 impl KurouServer {
     pub(crate) fn primary_guild(&self) -> Result<GuildId, String> {
-        self.default_guild.ok_or_else(|| "mod hands need DISCORD_GUILD_ID (the primary guild) configured".to_string())
+        self.default_guild.ok_or_else(|| "mod hands need PRIMARY_GUILD (the home guild) configured".to_string())
     }
 
     // the hand gate: same per-sister bot rule as send_message, plus an open ledger -

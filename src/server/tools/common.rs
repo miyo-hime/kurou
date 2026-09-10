@@ -51,16 +51,18 @@ pub fn resolve_guild(
     arg: Option<String>,
     default: Option<GuildId>,
     secondaries: &[GuildId],
+    readonly: &[GuildId],
 ) -> Result<GuildId, String> {
     let guild = match arg {
         Some(raw) => parse_snowflake(&raw).map(GuildId::new)?,
         None => default
-            .ok_or_else(|| "no guild_id given and DISCORD_GUILD_ID is not set".to_string())?,
+            .ok_or_else(|| "no guild_id given and PRIMARY_GUILD is not set".to_string())?,
     };
-    // the allowlist only bites when secondaries exist; otherwise reads stay unrestricted
-    if !secondaries.is_empty() && default != Some(guild) && !secondaries.contains(&guild) {
+    // the allowlist only bites when other guilds exist; otherwise reads stay unrestricted
+    let others = !secondaries.is_empty() || !readonly.is_empty();
+    if others && default != Some(guild) && !secondaries.contains(&guild) && !readonly.contains(&guild) {
         return Err(format!(
-            "guild {guild} is not in the read allowlist (primary + READONLY_GUILDS)"
+            "guild {guild} is not in the read allowlist (primary + SECONDARY_GUILDS + READONLY_GUILDS)"
         ));
     }
     Ok(guild)

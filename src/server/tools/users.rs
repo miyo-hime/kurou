@@ -37,7 +37,7 @@ impl KurouServer {
             limit,
         }): Parameters<GetUserIdByNameRequest>,
     ) -> Result<String, String> {
-        let guild = resolve_guild(guild_id, self.default_guild, self.readonly_guilds())?;
+        let guild = resolve_guild(guild_id, self.default_guild, &self.secondary_guilds, self.readonly_guilds())?;
         let query = name.trim();
         if query.is_empty() {
             return Err("name cannot be empty".to_string());

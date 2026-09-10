@@ -91,19 +91,17 @@ impl KurouServer {
 }
 
 impl KurouServer {
-    // the mouth's gate: when read-only secondaries exist, send_message may only land in
-    // the primary guild or a WAKE_DM_FROM recipient's DM. everything else is refused.
+    // the mouth's gate: once a primary is configured, send_message may only land in a
+    // writable guild (primary + secondaries) or a WAKE_DM_FROM recipient's DM. no
+    // primary means an unguilded dev crow - nothing to guard.
     pub(crate) async fn guard_send_target(&self, channel: serenity::model::id::ChannelId) -> Result<(), String> {
-        if self.readonly_guilds().is_empty() {
+        if self.default_guild.is_none() {
             return Ok(());
         }
-        let primary = self
-            .default_guild
-            .ok_or_else(|| "READONLY_GUILDS is set but DISCORD_GUILD_ID (primary) is not".to_string())?;
         // fail-closed: a probe failure means the primary bot can't even see the channel
-        // (it's in a secondary), so treat "can't verify" as "not primary" and refuse.
+        // (it's in a readonly guild), so treat "can't verify" as "not writable" and refuse.
         match self.client.channel_guild(channel).await {
-            Ok(Some(guild)) if guild == primary => Ok(()),
+            Ok(Some(guild)) if self.is_writable(guild) => Ok(()),
             // the private door swings both ways, but only for named knocks
             Ok(None) => match self.client.dm_recipient(channel).await {
                 Ok(Some(user)) if self.wake_dm_from.contains(&user) => Ok(()),
@@ -112,7 +110,7 @@ impl KurouServer {
                 )),
             },
             _ => Err(format!(
-                "refusing to send: channel {channel} is not in the primary guild ({primary}); secondaries are read-only"
+                "refusing to send: channel {channel} is not in a writable guild (PRIMARY_GUILD + SECONDARY_GUILDS); readonly guilds have no voice"
             )),
         }
     }

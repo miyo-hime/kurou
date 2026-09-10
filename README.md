@@ -25,7 +25,7 @@ own risk.
 - streamable MCP over **stdio** (local) or **HTTP** (hosted)
 - a focused read-window: list servers/channels/threads, read messages (anchored), fetch one message, read pins, deep-sweep a channel by author/mention/text, plus check/mark a mention inbox
 - voice when it has something to say: send a message, find a user id
-- optional read-only **secondary servers** on a separate observer bot - watch more, post in none
+- more servers than one: writable **secondary guilds** on the same bots, plus read-only guilds on a separate observer bot
 - compact message blocks built for an LLM to read, author ids inline, reply context inline
 - bearer auth + a tiny PKCE OAuth shim for hosted HTTP
 - structurally un-summonable by default: REST only, the gateway is never opened unless you ask for it
@@ -43,14 +43,14 @@ pointed at. the bot has to actually be a member of that server. then:
 
 ```powershell
 $env:DISCORD_TOKEN = "your_bot_token_here"
-$env:DISCORD_GUILD_ID = "your_server_id_here"
+$env:PRIMARY_GUILD = "your_server_id_here"
 .\kurou.exe --transport stdio
 ```
 
 linux/macos:
 
 ```bash
-DISCORD_TOKEN="your_bot_token_here" DISCORD_GUILD_ID="your_server_id_here" ./kurou --transport stdio
+DISCORD_TOKEN="your_bot_token_here" PRIMARY_GUILD="your_server_id_here" ./kurou --transport stdio
 ```
 
 stdio is the easy path - your MCP client launches the process and talks over
@@ -64,7 +64,7 @@ stdin/stdout. minimal client shape:
       "args": ["--transport", "stdio"],
       "env": {
         "DISCORD_TOKEN": "your_bot_token_here",
-        "DISCORD_GUILD_ID": "your_server_id_here"
+        "PRIMARY_GUILD": "your_server_id_here"
       }
     }
   }
@@ -77,13 +77,13 @@ client's `env` block above.
 
 ## the tools
 
-`guild_id` defaults to `DISCORD_GUILD_ID` on every tool that takes it, so you usually
+`guild_id` defaults to `PRIMARY_GUILD` on every tool that takes it, so you usually
 leave it out. snowflake ids come back as strings, because they outlive js number
 precision and nobody wants that bug.
 
 | tool | mutates? | what it does |
 |---|---:|---|
-| `list_servers` | no | the guilds the crow can read, each tagged `primary` (writable) or `readonly` (watch-only, separate bot) |
+| `list_servers` | no | the guilds the crow can read, each tagged `primary` (home guild, default reach), `secondary` (also writable), or `readonly` (watch-only, separate bot) |
 | `get_server_info` | no | guild name, id, member count, description |
 | `list_channels` | no | every channel with id, name, kind (Text/Voice/Category/Forum/...), and topic |
 | `list_threads` | no | the active (non-archived) threads in a guild; a thread id works anywhere a channel id does |
@@ -103,27 +103,39 @@ you), so it's good for finding people, not for fuzzy magic. `scan_channel` is th
 heavy read - it makes several API calls, so it's a separate tool rather than a flag,
 and the page cap keeps it honest.
 
-## read-only secondary servers
+## more than one server
 
-the crow can watch more than one server. the primary (`DISCORD_GUILD_ID`) is the only
-place it's ever allowed to speak; any guilds you list in `READONLY_GUILDS` are
-watch-only. those secondaries ride a **separate observer bot** (`READONLY_DISCORD_TOKEN`)
-- a different discord application, so it structurally *cannot* post as your primary bot
-there. read-only stops being a code check and becomes a discord-level fact.
+the crow can live in several servers at once, and every guild wears exactly one of
+three hats:
+
+- **primary** (`PRIMARY_GUILD`, one id) - the home guild and the default reach: tools
+  that take a `guild_id` land here when you leave it out, mentions and wake taps ring
+  from here, and the mod hands work here and nowhere else.
+- **secondary** (`SECONDARY_GUILDS`, comma-separated) - more writable guilds. the
+  primary bot (and any sister bots) must be members there; sends, reactions, typing,
+  mentions and wake taps all work, but the mod hands stay home.
+- **readonly** (`READONLY_GUILDS`, comma-separated) - watch-only. these ride a
+  **separate observer bot** (`READONLY_DISCORD_TOKEN`) - a different discord
+  application, so it structurally *cannot* post as your primary bot there. read-only
+  stops being a code check and becomes a discord-level fact.
 
 ```env
 DISCORD_TOKEN=primary_bot_token
-DISCORD_GUILD_ID=primary_guild_id
-READONLY_GUILDS=other_guild_a,other_guild_b
+PRIMARY_GUILD=home_guild_id
+SECONDARY_GUILDS=friendly_guild_a,friendly_guild_b
+READONLY_GUILDS=watched_guild_a,watched_guild_b
 READONLY_DISCORD_TOKEN=observer_bot_token
 ```
 
+a guild may not wear two hats; kurou refuses the config at boot rather than guess.
 routing is automatic: tools that take a `guild_id` pick the right bot from the guild,
 and channel-scoped reads (`read_messages`, `get_message`, `get_pinned`, `scan_channel`)
 resolve the bot from the channel for you. `send_message` resolves the target channel's
-guild and refuses anything that isn't the primary. when `READONLY_GUILDS` is empty none
-of this is active and there's no overhead. call `list_servers` to see which guild is
-which.
+guild and refuses anything that isn't writable - the gate arms the moment a primary is
+configured. call `list_servers` to see which guild is which.
+
+(`DISCORD_GUILD_ID` is the old name for `PRIMARY_GUILD` and still works, so a live
+unit survives the upgrade. new configs should use the new name.)
 
 ## attachments
 
@@ -199,7 +211,7 @@ Environment=MENTION_DB_PATH=/var/lib/kurou/mentions.sqlite3
 HTTP mode serves streamable MCP at `/mcp`:
 
 ```bash
-DISCORD_TOKEN="..." DISCORD_GUILD_ID="..." \
+DISCORD_TOKEN="..." PRIMARY_GUILD="..." \
   ./kurou --transport http --host 0.0.0.0 --port 3000
 ```
 
@@ -208,7 +220,7 @@ wide open and anyone who finds it gets your crow:
 
 ```bash
 export DISCORD_TOKEN="your_bot_token_here"
-export DISCORD_GUILD_ID="your_server_id_here"
+export PRIMARY_GUILD="your_server_id_here"
 export AUTH_TOKENS="koma:paste-a-random-token-here"
 export PUBLIC_BASE_URL="https://kurou.example.com"
 export ALLOWED_HOSTS="kurou.example.com"
@@ -245,7 +257,7 @@ it behind your reverse proxy if it's exposed. oauth cosplay still needs a chaper
 
 ```env
 DISCORD_TOKEN=your_bot_token_here
-DISCORD_GUILD_ID=your_server_id_here
+PRIMARY_GUILD=your_server_id_here
 AUTH_TOKENS=koma:paste-a-random-token-here
 OAUTH_TOKEN_LABEL=koma
 PUBLIC_BASE_URL=https://kurou.example.com
@@ -260,7 +272,9 @@ TRANSPORT=http
 | env var | cli flag | default | notes |
 |---|---|---|---|
 | `DISCORD_TOKEN` | `--discord-token` | none | required; the bot token |
-| `DISCORD_GUILD_ID` | `--discord-guild-id` | none | default + primary guild; `send_message` posts here and nowhere else, save `WAKE_DM_FROM` DMs |
+| `PRIMARY_GUILD` | `--primary-guild` | none | the home guild: default reach, mention/wake source, the only place the mod hands work |
+| `DISCORD_GUILD_ID` | `--discord-guild-id` | none | legacy name for `PRIMARY_GUILD`; still honored when the new name is unset |
+| `SECONDARY_GUILDS` | `--secondary-guild` | empty | comma-separated guild ids that are also writable (sends, reactions, typing, mentions, wake taps - no mod hands) |
 | `READONLY_GUILDS` | `--readonly-guild` | empty | comma-separated guild ids the crow may read but never post in |
 | `READONLY_DISCORD_TOKEN` | `--readonly-token` | none | observer bot token for the read-only guilds; required when `READONLY_GUILDS` is set |
 | `TRANSPORT` | `--transport` | `stdio` | `stdio` or `http` |
@@ -274,7 +288,7 @@ TRANSPORT=http
 | `GATEWAY_MODE` | `--gateway-mode` | `off` | `off`, `presence`, or `mentions` |
 | `MENTION_DB_PATH` | `--mention-db-path` | `mentions.sqlite3` | sqlite file used by `GATEWAY_MODE=mentions` |
 | `MENTION_KEYWORDS` | `--mention-keyword` | `koma` | comma-separated keyword list for the mention inbox |
-| `WAKE_URL` | `--wake-url` | none | perch endpoint; every koma-sighting in the primary guild POSTs here, HMAC-signed. travels with `WAKE_SECRET` or stays off |
+| `WAKE_URL` | `--wake-url` | none | perch endpoint; every koma-sighting in a writable guild POSTs here, HMAC-signed. travels with `WAKE_SECRET` or stays off |
 | `WAKE_SECRET` | `--wake-secret` | none | shared HMAC key for the wake-tap |
 | `WAKE_DM_FROM` | `--wake-dm-from` | empty | comma-separated user ids on the private wire: their DMs tap the perch (every message, no keyword) and their DM channels may be read and answered. empty = DMs are never even heard |
 | `RUST_LOG` | n/a | unset | try `kurou=info` when something's quiet |
@@ -317,11 +331,13 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl
 ### development
 
 ```bash
-cargo fmt --check
 cargo clippy --all-targets
-cargo check
+cargo test
 cargo build
 ```
+
+no rustfmt here, on purpose - the layout is hand-set and clippy guards the semantics.
+don't run `cargo fmt` over this repo.
 
 ## stack
 

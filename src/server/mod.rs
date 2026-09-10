@@ -46,11 +46,20 @@ pub(crate) struct Observer {
     pub(crate) guilds: Vec<GuildId>,
 }
 
+// primary + secondaries + readonly, parsed and cross-checked once at boot.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct GuildTopology {
+    pub(crate) primary: Option<GuildId>,
+    pub(crate) secondary: Vec<GuildId>,
+    pub(crate) readonly: Vec<GuildId>,
+}
+
 #[derive(Clone, Debug)]
 pub struct KurouServer {
     pub(crate) client: DiscordClient,
     pub(crate) observer: Option<Observer>,
     pub(crate) default_guild: Option<GuildId>,
+    pub(crate) secondary_guilds: Vec<GuildId>,
     pub(crate) mention_store: Option<MentionStore>,
     pub(crate) message_store: Option<MessageStore>,
     pub(crate) modlog_store: Option<ModlogStore>,
@@ -79,6 +88,7 @@ impl KurouServer {
             client,
             observer,
             default_guild,
+            secondary_guilds: Vec::new(),
             mention_store,
             message_store,
             modlog_store,
@@ -95,6 +105,11 @@ impl KurouServer {
         self
     }
 
+    pub(crate) fn with_secondary_guilds(mut self, guilds: Vec<GuildId>) -> Self {
+        self.secondary_guilds = guilds;
+        self
+    }
+
     pub fn with_presence(mut self, slot: Option<crate::gateway::PresenceSlot>) -> Self {
         self.presence = slot;
         self
@@ -102,6 +117,10 @@ impl KurouServer {
 
     pub(crate) fn readonly_guilds(&self) -> &[GuildId] {
         self.observer.as_ref().map(|observer| observer.guilds.as_slice()).unwrap_or(&[])
+    }
+
+    pub(crate) fn is_writable(&self, guild: GuildId) -> bool {
+        self.default_guild == Some(guild) || self.secondary_guilds.contains(&guild)
     }
 
     // the mouth belongs to whoever's asking: koma speaks with the primary bot, a sister
@@ -118,16 +137,16 @@ impl KurouServer {
         })
     }
 
-    // guild is known: primary token for the primary guild, observer for a secondary.
+    // guild is known: primary token for the writable guilds, observer for a readonly.
     pub(crate) fn client_for_guild(&self, guild: GuildId) -> &DiscordClient {
         match &self.observer {
-            Some(observer) if Some(guild) != self.default_guild => &observer.client,
+            Some(observer) if !self.is_writable(guild) => &observer.client,
             _ => &self.client,
         }
     }
 
     // only a channel id in hand. with no observer it's always primary; otherwise probe
-    // once - the primary bot sees its own guild's channels and 403s on the secondaries.
+    // once - the primary bot sees its writable guilds' channels and 403s on the readonly.
     pub(crate) async fn client_for_channel(
         &self,
         channel: serenity::model::id::ChannelId,
@@ -136,7 +155,7 @@ impl KurouServer {
             return &self.client;
         };
         match self.client.channel_guild(channel).await {
-            Ok(guild) if guild == self.default_guild => &self.client,
+            Ok(Some(guild)) if self.is_writable(guild) => &self.client,
             // a guildless channel is the primary bot's own DM - the observer never met it
             Ok(None) => &self.client,
             _ => &observer.client,
@@ -166,8 +185,8 @@ impl KurouServer {
     router = self.tool_router,
     name = "kurou",
     // the macro refuses env!, so this drifts from Cargo.toml unless bumped by hand
-    version = "0.22.0",
-    instructions = "a small window into a discord server. crow on the wire. reads: list_servers, get_server_info, list_channels (the guild's custom emoji and sticker names ride along - they're the server's culture, reach for them when they fit), list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). archive: search_messages (full-text search the local message archive, needs ARCHIVE=true). voice: send_message (guild stickers may ride along via sticker_ids), typing (raise the indicator as your own bot, one shot), add_reaction / remove_reaction (an emoji on a message in your own bot's voice - unicode as-is, custom as <:name:id>), set_presence (steer the primary bot's dot - perch-driven, primary voice only), get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. mod ledger: check_ledger, user_history - the crow's moderation memory, every action it witnessed or performed. mod hands (primary guild only, caller's own bot, intent required, every act recorded): ban_user, unban_user, kick_user, timeout_user, untimeout_user, warn_user, revoke_warn, add_role, remove_role, set_nickname, delete_message, lock_channel, unlock_channel, set_slowmode, purge_channel, delete_invite; get_bans and list_invites are open reads. the watcher also records what other moderators do: bans, unbans, kicks, timeouts, joins and leaves land as observed ledger rows. read-only secondary guilds ride a separate observer bot, routed for you. the private wire: DM channels of WAKE_DM_FROM users may be read and answered; every other DM does not exist to the crow. multi-identity: every caller is a labeled bearer - reads are open to all sisters, send_message and the mod hands act with the caller's own bot voice or refuse, and the mention inbox answers only to koma."
+    version = "0.23.0",
+    instructions = "a small window into discord servers. crow on the wire. guilds wear one of three hats: the primary (the home guild and default reach - when asked to check a message or channel with no server named, look here first), writable secondaries (the crow's bots live and speak there too), and readonly guilds (watch-only, a separate observer bot, routed for you). list_servers tells you which is which. reads: list_servers, get_server_info, list_channels (the guild's custom emoji and sticker names ride along - they're the server's culture, reach for them when they fit), list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). archive: search_messages (full-text search the local message archive, needs ARCHIVE=true). voice (primary + secondary guilds only): send_message (guild stickers may ride along via sticker_ids), typing (raise the indicator as your own bot, one shot), add_reaction / remove_reaction (an emoji on a message in your own bot's voice - unicode as-is, custom as <:name:id>), set_presence (steer the primary bot's dot - perch-driven, primary voice only), get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. mod ledger: check_ledger, user_history - the crow's moderation memory, every action it witnessed or performed. mod hands (primary guild only, caller's own bot, intent required, every act recorded): ban_user, unban_user, kick_user, timeout_user, untimeout_user, warn_user, revoke_warn, add_role, remove_role, set_nickname, delete_message, lock_channel, unlock_channel, set_slowmode, purge_channel, delete_invite; get_bans and list_invites are open reads. the watcher also records what other moderators do: bans, unbans, kicks, timeouts, joins and leaves land as observed ledger rows. the private wire: DM channels of WAKE_DM_FROM users may be read and answered; every other DM does not exist to the crow. multi-identity: every caller is a labeled bearer - reads are open to all sisters, send_message and the mod hands act with the caller's own bot voice or refuse, and the mention inbox answers only to koma."
 )]
 impl ServerHandler for KurouServer {}
 
@@ -182,12 +201,9 @@ pub async fn run_stdio(config: Config) -> Result<()> {
         .filter(|token| !token.trim().is_empty())
         .context("DISCORD_TOKEN is required (no token, no window)")?
         .to_string();
-    let default_guild = config
-        .discord_guild_id
-        .as_deref()
-        .map(parse_guild_id)
-        .transpose()?;
-    let observer = build_observer(&config, default_guild)?;
+    let topology = parse_topology(&config)?;
+    let default_guild = topology.primary;
+    let observer = build_observer(&config, &topology)?;
 
     // stdio is the local smoke path - the wall and the archive are http-only, so the
     // ledger only opens for the mention inbox or the mod layer.
@@ -213,6 +229,7 @@ pub async fn run_stdio(config: Config) -> Result<()> {
         GatewayConfig {
             mode: config.gateway_mode,
             default_guild,
+            secondary_guilds: topology.secondary.clone(),
             mention_keywords: config.mention_keywords.clone(),
             mention_store: mention_store.clone(),
             archive: None,
@@ -243,6 +260,7 @@ pub async fn run_stdio(config: Config) -> Result<()> {
         upload_store,
         Arc::default(),
     )
+    .with_secondary_guilds(topology.secondary.clone())
     .with_wake_dm_from(parse_wake_dm_from(&config.wake_dm_from))
     .with_presence(presence_slot)
     .serve(stdio())
@@ -265,12 +283,9 @@ pub async fn run_http(config: Config) -> Result<()> {
         .filter(|token| !token.trim().is_empty())
         .context("DISCORD_TOKEN is required (no token, no window)")?
         .to_string();
-    let default_guild = config
-        .discord_guild_id
-        .as_deref()
-        .map(parse_guild_id)
-        .transpose()?;
-    let observer = build_observer(&config, default_guild)?;
+    let topology = parse_topology(&config)?;
+    let default_guild = topology.primary;
+    let observer = build_observer(&config, &topology)?;
     let bind_addr: std::net::SocketAddr = (config.host, config.port).into();
 
     // one ledger for the whole crow. it opens when any tenant is live: the mention inbox,
@@ -337,13 +352,15 @@ pub async fn run_http(config: Config) -> Result<()> {
         GatewayConfig {
             mode: config.gateway_mode,
             default_guild,
+            secondary_guilds: topology.secondary.clone(),
             mention_keywords: config.mention_keywords.clone(),
             mention_store: mention_store.clone(),
             archive: archive_store.clone(),
             modlog: modlog_store.clone(),
             crow_bot_ids,
             fanout: primary_fanout,
-            broadcast_guilds: default_guild.into_iter().collect(),
+            // the primary bot lives in the secondaries too, so this gateway carries them
+            broadcast_guilds: default_guild.into_iter().chain(topology.secondary.iter().copied()).collect(),
             wake: crate::wake::WakeSender::from_config(config.wake_url.as_deref(), config.wake_secret.as_deref()),
             wake_dm_from: parse_wake_dm_from(&config.wake_dm_from),
             presence: presence_slot.clone(),
@@ -366,6 +383,7 @@ pub async fn run_http(config: Config) -> Result<()> {
             GatewayConfig {
                 mode: GatewayMode::Presence,
                 default_guild: None,
+                secondary_guilds: Vec::new(),
                 mention_keywords: Vec::new(),
                 mention_store: None,
                 // the observer never writes the modlog - moderation is primary-guild only
@@ -400,6 +418,7 @@ pub async fn run_http(config: Config) -> Result<()> {
                 client: DiscordClient::new(&token),
                 readonly_client: observer.as_ref().map(|observer| observer.client.clone()),
                 default_guild,
+                secondary_guilds: topology.secondary.clone(),
                 readonly_guilds: observer.as_ref().map(|observer| observer.guilds.clone()).unwrap_or_default(),
             },
             layout,
@@ -437,6 +456,7 @@ pub async fn run_http(config: Config) -> Result<()> {
     let factory_senders = senders.clone();
     let factory_wake_dm_from = parse_wake_dm_from(&config.wake_dm_from);
     let factory_presence = presence_slot.clone();
+    let factory_secondaries = topology.secondary.clone();
     let service: StreamableHttpService<KurouServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
@@ -450,6 +470,7 @@ pub async fn run_http(config: Config) -> Result<()> {
                     factory_store.clone(),
                     factory_senders.clone(),
                 )
+                .with_secondary_guilds(factory_secondaries.clone())
                 .with_wake_dm_from(factory_wake_dm_from.clone())
                 .with_presence(factory_presence.clone()))
             },
@@ -582,31 +603,45 @@ fn parse_wake_dm_from(ids: &[String]) -> Vec<UserId> {
     }).collect()
 }
 
-fn parse_guild_id(raw: &str) -> Result<GuildId> {
+fn parse_guild_id(name: &str, raw: &str) -> Result<GuildId> {
     let id = raw
         .trim()
         .parse::<u64>()
-        .with_context(|| format!("DISCORD_GUILD_ID '{raw}' is not a valid snowflake"))?;
+        .with_context(|| format!("{name} '{raw}' is not a valid snowflake"))?;
     Ok(GuildId::new(id))
 }
 
-fn build_observer(config: &Config, default_guild: Option<GuildId>) -> Result<Option<Observer>> {
-    let guilds = config
-        .readonly_guilds
-        .iter()
+fn parse_guild_list(name: &str, raw: &[String]) -> Result<Vec<GuildId>> {
+    raw.iter()
         .filter(|raw| !raw.trim().is_empty())
-        .map(|raw| {
-            raw.trim()
-                .parse::<u64>()
-                .map(GuildId::new)
-                .with_context(|| format!("READONLY_GUILDS '{raw}' is not a valid snowflake"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if guilds.is_empty() {
-        return Ok(None);
+        .map(|raw| parse_guild_id(name, raw))
+        .collect()
+}
+
+fn parse_topology(config: &Config) -> Result<GuildTopology> {
+    let primary = config
+        .primary_guild_raw()
+        .map(|raw| parse_guild_id("PRIMARY_GUILD", raw))
+        .transpose()?;
+    let secondary = parse_guild_list("SECONDARY_GUILDS", &config.secondary_guilds)?;
+    let readonly = parse_guild_list("READONLY_GUILDS", &config.readonly_guilds)?;
+    if primary.is_none() && (!secondary.is_empty() || !readonly.is_empty()) {
+        anyhow::bail!("SECONDARY_GUILDS/READONLY_GUILDS are set but PRIMARY_GUILD (the home guild) is not");
     }
-    if default_guild.is_none() {
-        anyhow::bail!("READONLY_GUILDS is set but DISCORD_GUILD_ID (the primary, the only place send_message may post) is not");
+    if let Some(primary) = primary
+        && (secondary.contains(&primary) || readonly.contains(&primary))
+    {
+        anyhow::bail!("PRIMARY_GUILD {primary} also appears in SECONDARY_GUILDS or READONLY_GUILDS; a guild wears one hat");
+    }
+    if let Some(guild) = secondary.iter().find(|guild| readonly.contains(guild)) {
+        anyhow::bail!("guild {guild} is in both SECONDARY_GUILDS and READONLY_GUILDS; writable and read-only can't both be true");
+    }
+    Ok(GuildTopology { primary, secondary, readonly })
+}
+
+fn build_observer(config: &Config, topology: &GuildTopology) -> Result<Option<Observer>> {
+    if topology.readonly.is_empty() {
+        return Ok(None);
     }
     let token = config
         .readonly_discord_token
@@ -614,7 +649,7 @@ fn build_observer(config: &Config, default_guild: Option<GuildId>) -> Result<Opt
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .context("READONLY_GUILDS is set but READONLY_DISCORD_TOKEN (the observer bot) is not")?;
-    Ok(Some(Observer { client: DiscordClient::new(token), guilds }))
+    Ok(Some(Observer { client: DiscordClient::new(token), guilds: topology.readonly.clone() }))
 }
 
 fn allowed_hosts(config: &Config) -> Vec<String> {
@@ -650,5 +685,60 @@ mod tests {
         let refusal = crow.sender_for("pyonka").unwrap_err();
         assert!(refusal.contains("read-only"));
         assert!(refusal.contains("DISCORD_TOKEN_PYONKA"));
+    }
+
+    fn config(args: &[&str]) -> Config {
+        use clap::Parser;
+        Config::try_parse_from(std::iter::once("kurou").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn topology_reads_primary_with_legacy_fallback() {
+        let fresh = parse_topology(&config(&["--primary-guild", "111"])).unwrap();
+        assert_eq!(fresh.primary, Some(GuildId::new(111)));
+
+        let legacy = parse_topology(&config(&["--discord-guild-id", "222"])).unwrap();
+        assert_eq!(legacy.primary, Some(GuildId::new(222)));
+
+        let both = parse_topology(&config(&["--primary-guild", "111", "--discord-guild-id", "222"])).unwrap();
+        assert_eq!(both.primary, Some(GuildId::new(111)));
+    }
+
+    #[test]
+    fn topology_rejects_orphan_lists_and_double_hats() {
+        assert!(parse_topology(&config(&["--secondary-guild", "333"])).is_err());
+        assert!(parse_topology(&config(&["--readonly-guild", "444"])).is_err());
+        assert!(parse_topology(&config(&["--primary-guild", "111", "--secondary-guild", "111"])).is_err());
+        assert!(parse_topology(&config(&["--primary-guild", "111", "--readonly-guild", "111"])).is_err());
+        assert!(
+            parse_topology(&config(&["--primary-guild", "111", "--secondary-guild", "333", "--readonly-guild", "333"]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn topology_splits_the_three_hats() {
+        let topology = parse_topology(&config(&[
+            "--primary-guild", "111",
+            "--secondary-guild", "333,334",
+            "--readonly-guild", "444",
+        ]))
+        .unwrap();
+        assert_eq!(topology.primary, Some(GuildId::new(111)));
+        assert_eq!(topology.secondary, vec![GuildId::new(333), GuildId::new(334)]);
+        assert_eq!(topology.readonly, vec![GuildId::new(444)]);
+    }
+
+    #[test]
+    fn writable_covers_primary_and_secondaries_only() {
+        let crow = server(HashMap::new());
+        let crow = KurouServer {
+            default_guild: Some(GuildId::new(111)),
+            ..crow
+        }
+        .with_secondary_guilds(vec![GuildId::new(333)]);
+        assert!(crow.is_writable(GuildId::new(111)));
+        assert!(crow.is_writable(GuildId::new(333)));
+        assert!(!crow.is_writable(GuildId::new(444)));
     }
 }
