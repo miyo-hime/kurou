@@ -293,6 +293,7 @@ TRANSPORT=http
 | `WAKE_URL_<NAME>` | n/a | none | a routed perch: sightings of `<name>` POST here instead. travels with `WAKE_SECRET_<NAME>` or stays off. a message naming several sisters wakes every matched perch |
 | `WAKE_SECRET_<NAME>` | n/a | none | that perch's own HMAC key - a leaked one can't wake anyone else's bird |
 | `WAKE_KEYWORDS_<NAME>` | n/a | `<name>` | comma-separated keywords that ring the named perch, replacing the name-only default |
+| `WAKE_BOT_ID_<NAME>` | n/a | none | the perch's own bot user id: mentions of that bot and bare replies to it ring the perch too, not just keywords. unset, the sink is keyword-only (a `DISCORD_TOKEN_<NAME>` bearer with the same name still binds it at boot) |
 | `WAKE_DM_FROM` | `--wake-dm-from` | empty | comma-separated user ids on the private wire: their DMs tap the perch (every message, no keyword) and their DM channels may be read and answered. empty = DMs are never even heard |
 | `RUST_LOG` | n/a | unset | try `kurou=info` when something's quiet |
 

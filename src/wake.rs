@@ -65,9 +65,10 @@ impl WakeSender {
 }
 
 // a routed perch: WAKE_URL_PYONKA + WAKE_SECRET_PYONKA grow a sink named "pyonka"
-// whose keyword defaults to its own name. WAKE_KEYWORDS_PYONKA widens the net.
-// the bare WAKE_URL/WAKE_SECRET pair stays the default perch for mentions and
-// replies to the crow itself - a new bird is two env vars, never a code change.
+// whose keyword defaults to its own name. WAKE_KEYWORDS_PYONKA widens the net, and
+// WAKE_BOT_ID_PYONKA gives the sink a face: mentions of that bot and replies to it
+// ring the perch too, not just keywords. the bare WAKE_URL/WAKE_SECRET pair stays
+// the default perch for the crow itself - a new bird is env vars, never a code change.
 #[derive(Clone)]
 pub struct NamedWakeSink {
     pub name: String,
@@ -84,6 +85,7 @@ fn named_sinks_from(vars: impl Iterator<Item = (String, String)>) -> Vec<NamedWa
     let mut urls = std::collections::BTreeMap::new();
     let mut secrets = std::collections::BTreeMap::new();
     let mut keywords = std::collections::BTreeMap::new();
+    let mut bot_ids = std::collections::BTreeMap::new();
     for (key, value) in vars {
         let value = value.trim().to_string();
         if value.is_empty() {
@@ -95,6 +97,12 @@ fn named_sinks_from(vars: impl Iterator<Item = (String, String)>) -> Vec<NamedWa
             secrets.insert(name.to_lowercase(), value);
         } else if let Some(name) = key.strip_prefix("WAKE_KEYWORDS_").filter(|name| !name.is_empty()) {
             keywords.insert(name.to_lowercase(), value);
+        } else if let Some(name) = key.strip_prefix("WAKE_BOT_ID_").filter(|name| !name.is_empty()) {
+            // UserId::new panics on zero, so the parse goes through NonZeroU64
+            match value.parse::<std::num::NonZeroU64>() {
+                Ok(id) => { bot_ids.insert(name.to_lowercase(), serenity::model::id::UserId::new(id.get())); }
+                Err(_) => tracing::warn!(sink = %name.to_lowercase(), value = %value, "WAKE_BOT_ID_{} is not a discord user id; the sink stays keyword-only", name),
+            }
         }
     }
     let names: std::collections::BTreeSet<String> = urls.keys().chain(secrets.keys()).cloned().collect();
@@ -111,7 +119,8 @@ fn named_sinks_from(vars: impl Iterator<Item = (String, String)>) -> Vec<NamedWa
                 .map(|raw| raw.split(',').map(|keyword| keyword.trim().to_lowercase()).filter(|keyword| !keyword.is_empty()).collect::<Vec<_>>())
                 .filter(|parsed: &Vec<String>| !parsed.is_empty())
                 .unwrap_or_else(|| vec![name.clone()]);
-            Some(NamedWakeSink { name, keywords, sender, bot_id: None })
+            let bot_id = bot_ids.get(&name).copied();
+            Some(NamedWakeSink { name, keywords, sender, bot_id })
         })
         .collect()
 }
@@ -178,5 +187,27 @@ mod tests {
         let sinks = named_sinks_from(vars(&[("WAKE_URL_PYONKA", "http://127.0.0.1:7858/wake"), ("WAKE_SECRET_PYONKA", "carrots")]));
         assert_eq!(sinks[0].bot_id, None);
         assert_eq!(sinks[0].keywords, vec!["pyonka"]);
+    }
+
+    #[test]
+    fn a_bot_id_gives_the_sink_a_face() {
+        let sinks = named_sinks_from(vars(&[
+            ("WAKE_URL_PYONKA", "http://127.0.0.1:7858/wake"),
+            ("WAKE_SECRET_PYONKA", "carrots"),
+            ("WAKE_BOT_ID_PYONKA", "424242"),
+        ]));
+        assert_eq!(sinks[0].bot_id, Some(serenity::model::id::UserId::new(424242)));
+    }
+
+    #[test]
+    fn a_garbage_bot_id_leaves_the_sink_keyword_only() {
+        for bad in ["carrots", "0", "-424242", "42.42"] {
+            let sinks = named_sinks_from(vars(&[
+                ("WAKE_URL_PYONKA", "http://127.0.0.1:7858/wake"),
+                ("WAKE_SECRET_PYONKA", "carrots"),
+                ("WAKE_BOT_ID_PYONKA", bad),
+            ]));
+            assert_eq!(sinks[0].bot_id, None, "{bad} should not bind");
+        }
     }
 }

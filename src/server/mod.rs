@@ -185,7 +185,7 @@ impl KurouServer {
     router = self.tool_router,
     name = "kurou",
     // the macro refuses env!, so this drifts from Cargo.toml unless bumped by hand
-    version = "0.25.0",
+    version = "0.26.0",
     instructions = "a small window into discord servers. crow on the wire. guilds wear one of three hats: the primary (the home guild and default reach - when asked to check a message or channel with no server named, look here first), writable secondaries (the crow's bots live and speak there too), and readonly guilds (watch-only, a separate observer bot, routed for you). list_servers tells you which is which. reads: list_servers, get_server_info, list_channels (the guild's custom emoji and sticker names ride along - they're the server's culture, reach for them when they fit), list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). archive: search_messages (full-text search the local message archive, needs ARCHIVE=true). voice (primary + secondary guilds only): send_message (guild stickers may ride along via sticker_ids), typing (raise the indicator as your own bot, one shot), add_reaction / remove_reaction (an emoji on a message in your own bot's voice - unicode as-is, custom as <:name:id>), set_presence (steer the caller's own bot dot - koma needs WAKE_URL, sisters need their own bot token, invisible until steered), get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. mod ledger: check_ledger, user_history - the crow's moderation memory, every action it witnessed or performed. mod hands (primary guild only, caller's own bot, intent required, every act recorded): ban_user, unban_user, kick_user, timeout_user, untimeout_user, warn_user, revoke_warn, add_role, remove_role, set_nickname, delete_message, lock_channel, unlock_channel, set_slowmode, purge_channel, delete_invite; get_bans and list_invites are open reads. the watcher also records what other moderators do: bans, unbans, kicks, timeouts, joins and leaves land as observed ledger rows. the private wire: DM channels of WAKE_DM_FROM users may be read and answered; every other DM does not exist to the crow. multi-identity: every caller is a labeled bearer - reads are open to all sisters, send_message and the mod hands act with the caller's own bot voice or refuse, and the mention inbox answers only to koma."
 )]
 impl ServerHandler for KurouServer {}
@@ -344,7 +344,7 @@ pub async fn run_http(config: Config) -> Result<()> {
         match sender.current_user_id().await {
             Ok(id) => {
                 crow_bot_ids.push(id);
-                if let Some(sink) = named_sinks.iter_mut().find(|sink| sink.name == *label) {
+                if let Some(sink) = named_sinks.iter_mut().find(|sink| sink.name == *label && sink.bot_id.is_none()) {
                     sink.bot_id = Some(id);
                     tracing::info!(sink = %sink.name, bot_id = %id, "named wake sink bound to sender bot");
                 }
