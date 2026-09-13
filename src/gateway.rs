@@ -33,6 +33,7 @@ pub struct GatewayConfig {
     // guild they both see the message, so only its owner records it - else we double up.
     pub broadcast_guilds: Vec<GuildId>,
     pub wake: Option<WakeSender>,
+    pub dm_wake: Option<WakeSender>,
     // routed perches: each named sink hears its own bot and keywords. the bare wake
     // sender above stays the default perch for the crow's own face as koma.
     pub named_sinks: Vec<NamedWakeSink>,
@@ -60,6 +61,7 @@ pub fn spawn_gateway(token: String, config: GatewayConfig) -> Option<JoinHandle<
         && config.fanout.is_none()
         && config.archive.is_none()
         && config.modlog.is_none()
+        && config.dm_wake.is_none()
     {
         return None;
     }
@@ -78,30 +80,7 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         .await
         .context("failed to fetch current bot user before gateway start")?
         .id;
-    let mut intents = match config.mode {
-        GatewayMode::Off => GatewayIntents::empty(),
-        GatewayMode::Presence => GatewayIntents::GUILDS,
-        GatewayMode::Mentions => {
-            GatewayIntents::GUILDS
-                | GatewayIntents::GUILD_MESSAGES
-                | GatewayIntents::MESSAGE_CONTENT
-        }
-    };
-    // the wall and the archive both need to hear every message, so either forces the
-    // message intents on even when mention-recording is off.
-    if config.fanout.is_some() || config.archive.is_some() {
-        intents |= GatewayIntents::GUILDS
-            | GatewayIntents::GUILD_MESSAGES
-            | GatewayIntents::MESSAGE_CONTENT;
-    }
-    // GUILD_MEMBERS is privileged - it's granted in the dev portal (Mother's word,
-    // 2026-09-06); if it ever gets revoked the whole gateway fails to identify.
-    if config.modlog.is_some() {
-        intents |= GatewayIntents::GUILDS | GatewayIntents::GUILD_MODERATION | GatewayIntents::GUILD_MEMBERS;
-    }
-    if config.mode == GatewayMode::Mentions && config.wake.is_some() && !config.wake_dm_from.is_empty() {
-        intents |= GatewayIntents::DIRECT_MESSAGES;
-    }
+    let intents = gateway_intents(&config);
 
     let handler = Handler {
         mode: config.mode,
@@ -117,6 +96,7 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         fanout: config.fanout,
         broadcast_guilds: config.broadcast_guilds,
         wake: config.wake,
+        dm_wake: config.dm_wake,
         named_sinks: config.named_sinks,
         wake_dm_from: config.wake_dm_from,
         presence: config.presence,
@@ -131,6 +111,26 @@ async fn run_gateway(token: &str, config: GatewayConfig) -> Result<()> {
         .start()
         .await
         .context("discord gateway client failed")
+}
+
+fn gateway_intents(config: &GatewayConfig) -> GatewayIntents {
+    let mut intents = match config.mode {
+        GatewayMode::Off => GatewayIntents::empty(),
+        GatewayMode::Presence => GatewayIntents::GUILDS,
+        GatewayMode::Mentions => GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT,
+    };
+    if config.fanout.is_some() || config.archive.is_some() {
+        intents |= GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
+    }
+    // GUILD_MEMBERS is privileged - it's granted in the dev portal (Mother's word,
+    // 2026-09-06); if it ever gets revoked the whole gateway fails to identify.
+    if config.modlog.is_some() {
+        intents |= GatewayIntents::GUILDS | GatewayIntents::GUILD_MODERATION | GatewayIntents::GUILD_MEMBERS;
+    }
+    if config.dm_wake.is_some() && !config.wake_dm_from.is_empty() {
+        intents |= GatewayIntents::DIRECT_MESSAGES;
+    }
+    intents
 }
 
 #[derive(Clone)]
@@ -151,6 +151,7 @@ struct Handler {
     fanout: Option<WallFanout>,
     broadcast_guilds: Vec<GuildId>,
     wake: Option<WakeSender>,
+    dm_wake: Option<WakeSender>,
     named_sinks: Vec<NamedWakeSink>,
     wake_dm_from: Vec<UserId>,
     presence: Option<PresenceSlot>,
@@ -499,21 +500,18 @@ impl EventHandler for Handler {
             }
         }
 
-        if self.mode != GatewayMode::Mentions {
-            return;
-        }
-        if message.author.id == self.bot_user_id {
-            return;
-        }
         // the private wire inverts the guild doctrine: DMs are the open internet, so
         // only allowlisted senders tap, and their every message is a turn - no keyword.
         // nothing else touches a DM: no archive row, no mention row, no wall.
         if message.guild_id.is_none() {
-            if let Some(wake) = &self.wake
-                && self.wake_dm_from.contains(&message.author.id)
+            if let Some(wake) = &self.dm_wake
+                && let Some(tap) = dm_wake_tap(&message, self.bot_user_id, &self.wake_dm_from)
             {
-                wake.tap(ctx.http.clone(), wake_tap(&message, Vec::new(), true));
+                wake.tap(ctx.http.clone(), tap);
             }
+            return;
+        }
+        if self.mode != GatewayMode::Mentions || message.author.id == self.bot_user_id {
             return;
         }
         // mentions and wake taps ring across every writable guild, primary and secondary
@@ -583,6 +581,11 @@ impl EventHandler for Handler {
     }
 }
 
+fn dm_wake_tap(message: &Message, bot: UserId, allowlist: &[UserId]) -> Option<WakeTap> {
+    (message.guild_id.is_none() && message.author.id != bot && allowlist.contains(&message.author.id))
+        .then(|| wake_tap(message, Vec::new(), true))
+}
+
 fn wake_tap(message: &Message, matched_terms: Vec<String>, dm: bool) -> WakeTap {
     WakeTap {
         channel_id: message.channel_id.to_string(),
@@ -622,5 +625,64 @@ fn matched_terms(message: &Message, bot_id: Option<UserId>, keywords: &[String])
     }
 
     matched
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gateway_config(dm_wake: Option<WakeSender>, wake_dm_from: Vec<UserId>) -> GatewayConfig {
+        GatewayConfig {
+            mode: GatewayMode::Presence,
+            default_guild: None,
+            secondary_guilds: Vec::new(),
+            mention_keywords: Vec::new(),
+            mention_store: None,
+            archive: None,
+            modlog: None,
+            crow_bot_ids: Vec::new(),
+            fanout: None,
+            broadcast_guilds: Vec::new(),
+            wake: None,
+            dm_wake,
+            named_sinks: Vec::new(),
+            wake_dm_from,
+            presence: Some(PresenceSlot::default()),
+        }
+    }
+
+    #[test]
+    fn bearer_dm_intent_needs_both_a_sink_and_an_allowlist() {
+        let sender = WakeSender::from_config(Some("http://127.0.0.1:7858/wake"), Some("carrots"));
+        let armed = gateway_intents(&gateway_config(sender.clone(), vec![UserId::new(42)]));
+        assert!(armed.contains(GatewayIntents::GUILDS));
+        assert!(armed.contains(GatewayIntents::DIRECT_MESSAGES));
+        assert!(!armed.intersects(GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT));
+
+        assert!(!gateway_intents(&gateway_config(None, vec![UserId::new(42)])).contains(GatewayIntents::DIRECT_MESSAGES));
+        assert!(!gateway_intents(&gateway_config(sender, Vec::new())).contains(GatewayIntents::DIRECT_MESSAGES));
+    }
+
+    #[test]
+    fn allowed_dm_tap_uses_the_primary_private_wire_dialect() {
+        let mut message = Message::default();
+        message.id = MessageId::new(123);
+        message.channel_id = ChannelId::new(456);
+        message.author.id = UserId::new(42);
+        message.author.name = "miyo".to_string();
+        message.content = "no wake word needed".to_string();
+
+        let tap = dm_wake_tap(&message, UserId::new(99), &[UserId::new(42)]).unwrap();
+        assert!(tap.dm);
+        assert!(tap.matched_terms.is_empty());
+        assert_eq!(tap.channel_id, "456");
+        assert_eq!(tap.message_id, "123");
+        assert_eq!(tap.author_id, "42");
+        assert!(dm_wake_tap(&message, UserId::new(99), &[]).is_none());
+        assert!(dm_wake_tap(&message, UserId::new(42), &[UserId::new(42)]).is_none());
+
+        message.guild_id = Some(GuildId::new(7));
+        assert!(dm_wake_tap(&message, UserId::new(99), &[UserId::new(42)]).is_none());
+    }
 }
 

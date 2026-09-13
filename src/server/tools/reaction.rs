@@ -40,7 +40,7 @@ impl KurouServer {
         let channel = parse_channel(&channel_id)?;
         let message = parse_message(&message_id)?;
         let reaction = parse_emoji(&emoji)?;
-        self.guard_send_target(channel).await?;
+        self.guard_send_target(sender, channel).await?;
         sender.react(channel, message, &reaction).await.map_err(tool_error)?;
         json_text(&serde_json::json!({ "reacted": reaction.to_string(), "message_id": message.to_string() }))
     }
@@ -58,7 +58,7 @@ impl KurouServer {
         let channel = parse_channel(&channel_id)?;
         let message = parse_message(&message_id)?;
         let reaction = parse_emoji(&emoji)?;
-        self.guard_send_target(channel).await?;
+        self.guard_send_target(sender, channel).await?;
         sender.unreact(channel, message, &reaction).await.map_err(tool_error)?;
         json_text(&serde_json::json!({ "unreacted": reaction.to_string(), "message_id": message.to_string() }))
     }

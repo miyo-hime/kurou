@@ -294,7 +294,7 @@ TRANSPORT=http
 | `WAKE_SECRET_<NAME>` | n/a | none | that perch's own HMAC key - a leaked one can't wake anyone else's bird |
 | `WAKE_KEYWORDS_<NAME>` | n/a | `<name>` | comma-separated keywords that ring the named perch, replacing the name-only default |
 | `WAKE_BOT_ID_<NAME>` | n/a | none | the perch's own bot user id: mentions of that bot and bare replies to it ring the perch too, not just keywords. unset, the sink is keyword-only (a `DISCORD_TOKEN_<NAME>` bearer with the same name still binds it at boot) |
-| `WAKE_DM_FROM` | `--wake-dm-from` | empty | comma-separated user ids on the private wire: their DMs tap the perch (every message, no keyword) and their DM channels may be read and answered. empty = DMs are never even heard |
+| `WAKE_DM_FROM` | `--wake-dm-from` | empty | global comma-separated user ids on every private wire: their DMs to the primary bot tap the default perch, and DMs to a `DISCORD_TOKEN_<NAME>` bot tap its matching named sink. DM channels read and answer through the bot that owns them. a bearer socket subscribes only when its named sink exists; empty = DMs are never even heard |
 | `RUST_LOG` | n/a | unset | try `kurou=info` when something's quiet |
 
 ## the un-summonable thing

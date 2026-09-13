@@ -29,7 +29,7 @@ impl KurouServer {
     ) -> Result<String, String> {
         let sender = self.sender_for(&caller_identity(&extensions)?)?;
         let channel = parse_channel(&channel_id)?;
-        self.guard_send_target(channel).await?;
+        self.guard_send_target(sender, channel).await?;
         sender.broadcast_typing(channel).await.map_err(tool_error)?;
         json_text(&serde_json::json!({ "typing": channel.to_string() }))
     }

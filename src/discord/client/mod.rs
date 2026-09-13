@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serenity::builder::{CreateAttachment, CreateMessage, EditChannel, EditMember};
 use serenity::http::{Http, MessagePagination};
-use serenity::model::channel::{GuildChannel, Message, MessageReference, PermissionOverwrite, ReactionType};
+use serenity::model::channel::{Channel, GuildChannel, Message, MessageReference, PermissionOverwrite, ReactionType};
 use serenity::model::guild::{Ban, Emoji, Member, Role};
 use serenity::model::guild::PartialGuild;
 use serenity::model::id::{ChannelId, GuildId, MessageId, StickerId, UserId};
@@ -15,6 +15,12 @@ use serenity::model::user::User;
 pub enum AttachmentSource {
     Url(String),
     Bytes { filename: String, data: Vec<u8> },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChannelTarget {
+    Guild(GuildId),
+    Direct(UserId),
 }
 
 #[derive(Clone)]
@@ -81,6 +87,14 @@ impl DiscordClient {
         Ok(self.http.get_member(guild_id, user_id).await?)
     }
 
+    pub async fn channel_target(&self, channel_id: ChannelId) -> Result<ChannelTarget> {
+        match self.http.get_channel(channel_id).await? {
+            Channel::Guild(channel) => Ok(ChannelTarget::Guild(channel.guild_id)),
+            Channel::Private(channel) => Ok(ChannelTarget::Direct(channel.recipient.id)),
+            _ => anyhow::bail!("discord returned an unsupported channel kind"),
+        }
+    }
+
     // the hard gate's eyes: which guild does this channel live in? none = dm/group.
     pub async fn channel_guild(&self, channel_id: ChannelId) -> Result<Option<GuildId>> {
         Ok(self
@@ -89,10 +103,6 @@ impl DiscordClient {
             .await?
             .guild()
             .map(|c| c.guild_id))
-    }
-
-    pub async fn dm_recipient(&self, channel_id: ChannelId) -> Result<Option<UserId>> {
-        Ok(self.http.get_channel(channel_id).await?.private().map(|c| c.recipient.id))
     }
 
     pub async fn send_message(

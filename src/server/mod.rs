@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use crate::archive::MessageStore;
 use crate::auth::AuthConfig;
 use crate::config::{Config, GatewayMode};
-use crate::discord::DiscordClient;
+use crate::discord::{ChannelTarget, DiscordClient};
 use crate::gateway::{GatewayConfig, PresenceSlot};
 use crate::ledger::Ledger;
 use crate::mentions::MentionStore;
@@ -145,20 +145,47 @@ impl KurouServer {
         }
     }
 
-    // only a channel id in hand. with no observer it's always primary; otherwise probe
-    // once - the primary bot sees its writable guilds' channels and 403s on the readonly.
     pub(crate) async fn client_for_channel(
         &self,
+        identity: &str,
         channel: serenity::model::id::ChannelId,
-    ) -> &DiscordClient {
-        let Some(observer) = &self.observer else {
-            return &self.client;
-        };
-        match self.client.channel_guild(channel).await {
-            Ok(Some(guild)) if self.is_writable(guild) => &self.client,
-            // a guildless channel is the primary bot's own DM - the observer never met it
-            Ok(None) => &self.client,
-            _ => &observer.client,
+    ) -> Result<&DiscordClient, String> {
+        if identity != "koma"
+            && let Some(sender) = self.senders.get(identity)
+            && let Ok(target) = sender.channel_target(channel).await
+        {
+            return self.client_for_target(sender, target, channel);
+        }
+
+        match self.client.channel_target(channel).await {
+            Ok(target) => self.client_for_primary_target(identity, target, channel),
+            Err(_) => match &self.observer {
+                Some(observer) => match observer.client.channel_target(channel).await {
+                    Ok(target @ ChannelTarget::Guild(_)) => self.client_for_target(&observer.client, target, channel),
+                    _ => Err(format!("refusing to read: channel {channel} does not belong to '{identity}' or a readable guild")),
+                },
+                None => Err(format!("refusing to read: channel {channel} does not belong to '{identity}' or a readable guild")),
+            },
+        }
+    }
+
+    fn client_for_primary_target(&self, identity: &str, target: ChannelTarget, channel: serenity::model::id::ChannelId) -> Result<&DiscordClient, String> {
+        match target {
+            ChannelTarget::Direct(_) if identity != "koma" => Err(format!("refusing to read: channel {channel} belongs to koma's DM lane, not '{identity}'")),
+            _ => self.client_for_target(&self.client, target, channel),
+        }
+    }
+
+    fn client_for_target<'a>(
+        &'a self,
+        client: &'a DiscordClient,
+        target: ChannelTarget,
+        channel: serenity::model::id::ChannelId,
+    ) -> Result<&'a DiscordClient, String> {
+        match target {
+            ChannelTarget::Guild(guild) => Ok(self.client_for_guild(guild)),
+            ChannelTarget::Direct(user) if self.wake_dm_from.contains(&user) => Ok(client),
+            ChannelTarget::Direct(_) => Err(format!("refusing to read: channel {channel} is a DM outside WAKE_DM_FROM; the private wire only opens for named recipients")),
         }
     }
 
@@ -185,7 +212,7 @@ impl KurouServer {
     router = self.tool_router,
     name = "kurou",
     // the macro refuses env!, so this drifts from Cargo.toml unless bumped by hand
-    version = "0.26.0",
+    version = "0.27.0",
     instructions = "a small window into discord servers. crow on the wire. guilds wear one of three hats: the primary (the home guild and default reach - when asked to check a message or channel with no server named, look here first), writable secondaries (the crow's bots live and speak there too), and readonly guilds (watch-only, a separate observer bot, routed for you). list_servers tells you which is which. reads: list_servers, get_server_info, list_channels (the guild's custom emoji and sticker names ride along - they're the server's culture, reach for them when they fit), list_threads, read_messages (anchor with around/before/after), get_message, get_pinned, scan_channel (deep author/mention/text sweep). archive: search_messages (full-text search the local message archive, needs ARCHIVE=true). voice (primary + secondary guilds only): send_message (guild stickers may ride along via sticker_ids), typing (raise the indicator as your own bot, one shot), add_reaction / remove_reaction (an emoji on a message in your own bot's voice - unicode as-is, custom as <:name:id>), set_presence (steer the caller's own bot dot - koma needs WAKE_URL, sisters need their own bot token, invisible until steered), get_user_id_by_name. mentions: check_mentions, mark_mentions_seen. mod ledger: check_ledger, user_history - the crow's moderation memory, every action it witnessed or performed. mod hands (primary guild only, caller's own bot, intent required, every act recorded): ban_user, unban_user, kick_user, timeout_user, untimeout_user, warn_user, revoke_warn, add_role, remove_role, set_nickname, delete_message, lock_channel, unlock_channel, set_slowmode, purge_channel, delete_invite; get_bans and list_invites are open reads. the watcher also records what other moderators do: bans, unbans, kicks, timeouts, joins and leaves land as observed ledger rows. the private wire: DM channels of WAKE_DM_FROM users may be read and answered; every other DM does not exist to the crow. multi-identity: every caller is a labeled bearer - reads are open to all sisters, send_message and the mod hands act with the caller's own bot voice or refuse, and the mention inbox answers only to koma."
 )]
 impl ServerHandler for KurouServer {}
@@ -225,6 +252,9 @@ pub async fn run_stdio(config: Config) -> Result<()> {
 
     let presence: Arc<HashMap<String, PresenceSlot>> = Arc::new(config.wake_url.is_some().then(|| ("koma".to_string(), PresenceSlot::default())).into_iter().collect());
     let presence_slot = presence.get("koma").cloned();
+    let wake_dm_from = parse_wake_dm_from(&config.wake_dm_from);
+    let wake = crate::wake::WakeSender::from_config(config.wake_url.as_deref(), config.wake_secret.as_deref());
+    let dm_wake = (config.gateway_mode == GatewayMode::Mentions).then(|| wake.clone()).flatten();
     let gateway = crate::gateway::spawn_gateway(
         token.clone(),
         GatewayConfig {
@@ -238,9 +268,10 @@ pub async fn run_stdio(config: Config) -> Result<()> {
             crow_bot_ids: Vec::new(),
             fanout: None,
             broadcast_guilds: Vec::new(),
-            wake: crate::wake::WakeSender::from_config(config.wake_url.as_deref(), config.wake_secret.as_deref()),
+            wake,
+            dm_wake,
             named_sinks: crate::wake::named_sinks(),
-            wake_dm_from: parse_wake_dm_from(&config.wake_dm_from),
+            wake_dm_from: wake_dm_from.clone(),
             presence: presence_slot.clone(),
         },
     );
@@ -263,7 +294,7 @@ pub async fn run_stdio(config: Config) -> Result<()> {
         Arc::default(),
     )
     .with_secondary_guilds(topology.secondary.clone())
-    .with_wake_dm_from(parse_wake_dm_from(&config.wake_dm_from))
+    .with_wake_dm_from(wake_dm_from)
     .with_presence(presence)
     .serve(stdio())
     .await?;
@@ -340,6 +371,7 @@ pub async fn run_http(config: Config) -> Result<()> {
     // ban would land twice: once with intent, once as a hollow observed echo.
     let mut crow_bot_ids = Vec::new();
     let mut named_sinks = crate::wake::named_sinks();
+    let wake_dm_from = parse_wake_dm_from(&config.wake_dm_from);
     for (label, sender) in senders.iter() {
         match sender.current_user_id().await {
             Ok(id) => {
@@ -365,12 +397,15 @@ pub async fn run_http(config: Config) -> Result<()> {
         }
         let slot = PresenceSlot::default();
         presence.insert(label.clone(), slot.clone());
-        if let Some(gateway) = spawn_presence_gateway(sender_token.clone(), slot) {
+        let dm_wake = bearer_dm_wake(label, &named_sinks);
+        if let Some(gateway) = spawn_presence_gateway(sender_token.clone(), slot, dm_wake, wake_dm_from.clone()) {
             bearer_gateways.push(gateway);
         }
     }
     let presence = Arc::new(presence);
     let presence_slot = presence.get("koma").cloned();
+    let wake = crate::wake::WakeSender::from_config(config.wake_url.as_deref(), config.wake_secret.as_deref());
+    let dm_wake = (config.gateway_mode == GatewayMode::Mentions).then(|| wake.clone()).flatten();
     let gateway = crate::gateway::spawn_gateway(
         token.clone(),
         GatewayConfig {
@@ -385,9 +420,10 @@ pub async fn run_http(config: Config) -> Result<()> {
             fanout: primary_fanout,
             // the primary bot lives in the secondaries too, so this gateway carries them
             broadcast_guilds: default_guild.into_iter().chain(topology.secondary.iter().copied()).collect(),
-            wake: crate::wake::WakeSender::from_config(config.wake_url.as_deref(), config.wake_secret.as_deref()),
+            wake,
+            dm_wake,
             named_sinks,
-            wake_dm_from: parse_wake_dm_from(&config.wake_dm_from),
+            wake_dm_from: wake_dm_from.clone(),
             presence: presence_slot,
         },
     );
@@ -423,6 +459,7 @@ pub async fn run_http(config: Config) -> Result<()> {
                 broadcast_guilds: observer.guilds.clone(),
                 // the observer never taps - the perches answer to writable guilds only
                 wake: None,
+                dm_wake: None,
                 named_sinks: Vec::new(),
                 wake_dm_from: Vec::new(),
                 presence: None,
@@ -480,7 +517,7 @@ pub async fn run_http(config: Config) -> Result<()> {
     let factory_message = archive_store.clone();
     let factory_modlog = modlog_store.clone();
     let factory_senders = senders.clone();
-    let factory_wake_dm_from = parse_wake_dm_from(&config.wake_dm_from);
+    let factory_wake_dm_from = wake_dm_from;
     let factory_presence = presence.clone();
     let factory_secondaries = topology.secondary.clone();
     let service: StreamableHttpService<KurouServer, LocalSessionManager> =
@@ -614,7 +651,11 @@ pub async fn run_http(config: Config) -> Result<()> {
     Ok(())
 }
 
-fn spawn_presence_gateway(token: String, presence: PresenceSlot) -> Option<tokio::task::JoinHandle<()>> {
+fn bearer_dm_wake(label: &str, named_sinks: &[crate::wake::NamedWakeSink]) -> Option<crate::wake::WakeSender> {
+    named_sinks.iter().find(|sink| sink.name == label).map(|sink| sink.sender.clone())
+}
+
+fn spawn_presence_gateway(token: String, presence: PresenceSlot, dm_wake: Option<crate::wake::WakeSender>, wake_dm_from: Vec<UserId>) -> Option<tokio::task::JoinHandle<()>> {
     crate::gateway::spawn_gateway(token, GatewayConfig {
         mode: GatewayMode::Presence,
         default_guild: None,
@@ -627,8 +668,9 @@ fn spawn_presence_gateway(token: String, presence: PresenceSlot) -> Option<tokio
         fanout: None,
         broadcast_guilds: Vec::new(),
         wake: None,
+        dm_wake,
         named_sinks: Vec::new(),
-        wake_dm_from: Vec::new(),
+        wake_dm_from,
         presence: Some(presence),
     })
 }
@@ -645,8 +687,8 @@ fn build_modlog_notifier(config: &Config, token: &str) -> Result<Option<crate::m
 
 // a typo here would kill the summons silently, so bad ids get a warning, not a shrug
 fn parse_wake_dm_from(ids: &[String]) -> Vec<UserId> {
-    ids.iter().map(|id| id.trim()).filter(|id| !id.is_empty()).filter_map(|id| match id.parse::<u64>() {
-        Ok(id) => Some(UserId::new(id)),
+    ids.iter().map(|id| id.trim()).filter(|id| !id.is_empty()).filter_map(|id| match id.parse::<std::num::NonZeroU64>() {
+        Ok(id) => Some(UserId::new(id.get())),
         Err(_) => { tracing::warn!(id, "WAKE_DM_FROM entry is not a user id snowflake; skipped"); None }
     }).collect()
 }
@@ -733,6 +775,39 @@ mod tests {
         let refusal = crow.sender_for("pyonka").unwrap_err();
         assert!(refusal.contains("read-only"));
         assert!(refusal.contains("DISCORD_TOKEN_PYONKA"));
+    }
+
+    #[test]
+    fn direct_channel_routing_keeps_the_bearers_voice_and_allowlist() {
+        let crow = server(HashMap::from([("mecha".to_string(), DiscordClient::new("mecha-token"))]))
+            .with_wake_dm_from(vec![UserId::new(42)]);
+        let mecha = crow.senders.get("mecha").unwrap();
+        let selected = crow.client_for_target(mecha, ChannelTarget::Direct(UserId::new(42)), serenity::model::id::ChannelId::new(7)).unwrap();
+        assert!(std::ptr::eq(selected, mecha));
+        assert!(crow.client_for_target(mecha, ChannelTarget::Direct(UserId::new(43)), serenity::model::id::ChannelId::new(7)).is_err());
+
+        let selected = crow.client_for_target(mecha, ChannelTarget::Guild(GuildId::new(8)), serenity::model::id::ChannelId::new(7)).unwrap();
+        assert!(std::ptr::eq(selected, &crow.client));
+        assert!(crow.client_for_primary_target("mecha", ChannelTarget::Direct(UserId::new(42)), serenity::model::id::ChannelId::new(7)).is_err());
+        let selected = crow.client_for_primary_target("koma", ChannelTarget::Direct(UserId::new(42)), serenity::model::id::ChannelId::new(7)).unwrap();
+        assert!(std::ptr::eq(selected, &crow.client));
+    }
+
+    #[test]
+    fn bearer_dm_wake_needs_a_matching_named_sink() {
+        let sink = crate::wake::NamedWakeSink {
+            name: "mecha".to_string(),
+            keywords: vec!["mecha".to_string()],
+            sender: crate::wake::WakeSender::from_config(Some("http://127.0.0.1:7858/wake"), Some("carrots")).unwrap(),
+            bot_id: None,
+        };
+        assert!(bearer_dm_wake("mecha", std::slice::from_ref(&sink)).is_some());
+        assert!(bearer_dm_wake("kuro", &[sink]).is_none());
+    }
+
+    #[test]
+    fn wake_dm_allowlist_skips_zero_and_garbage_ids() {
+        assert_eq!(parse_wake_dm_from(&[" 42 ".to_string(), "0".to_string(), "rabbit".to_string()]), vec![UserId::new(42)]);
     }
 
     fn config(args: &[&str]) -> Config {

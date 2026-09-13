@@ -7,7 +7,7 @@ use serenity::model::channel::GuildChannel;
 
 use crate::discord::types::{RenderedMessage, channel_header, render_messages};
 use crate::server::KurouServer;
-use crate::server::tools::common::{enrich_display_names, parse_channel, parse_message, tool_error};
+use crate::server::tools::common::{caller_identity, enrich_display_names, parse_channel, parse_message, tool_error};
 
 pub fn router() -> ToolRouter<KurouServer> {
     KurouServer::messages_router()
@@ -62,12 +62,13 @@ impl KurouServer {
             before,
             after,
         }): Parameters<ReadMessagesRequest>,
+        extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
         let channel = parse_channel(&channel_id)?;
         let anchor = build_anchor(around, before, after)?;
         // 3am-me clamp: no yanking the whole backlog in one call
         let limit = limit.unwrap_or(50).clamp(1, 100);
-        let client = self.client_for_channel(channel).await;
+        let client = self.client_for_channel(&caller_identity(&extensions)?, channel).await?;
         let mut messages = client.messages(channel, anchor, limit).await.map_err(tool_error)?;
         // discord returns newest-first for EVERY anchor mode, after included - smoked live 2026-09-07. the dpy ascending-after lore is their normalization, not the api
         messages.reverse();
@@ -90,10 +91,11 @@ impl KurouServer {
             channel_id,
             message_id,
         }): Parameters<GetMessageRequest>,
+        extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
         let channel = parse_channel(&channel_id)?;
         let message_id = parse_message(&message_id)?;
-        let client = self.client_for_channel(channel).await;
+        let client = self.client_for_channel(&caller_identity(&extensions)?, channel).await?;
         let message = client.message(channel, message_id).await.map_err(tool_error)?;
         let context = client.channel(channel).await.ok().flatten();
         let mut rendered = vec![RenderedMessage::from(&message)];
@@ -110,9 +112,10 @@ impl KurouServer {
     pub async fn get_pinned(
         &self,
         Parameters(GetPinnedRequest { channel_id }): Parameters<GetPinnedRequest>,
+        extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
         let channel = parse_channel(&channel_id)?;
-        let client = self.client_for_channel(channel).await;
+        let client = self.client_for_channel(&caller_identity(&extensions)?, channel).await?;
         let messages = client.pins(channel).await.map_err(tool_error)?;
         let context = client.channel(channel).await.ok().flatten();
         let mut rendered = messages.iter().map(RenderedMessage::from).collect::<Vec<_>>();

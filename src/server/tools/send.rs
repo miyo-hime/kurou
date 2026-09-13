@@ -78,7 +78,7 @@ impl KurouServer {
         let channel = parse_channel(&channel_id)?;
         let sticker_ids = parse_sticker_ids(sticker_ids)?;
         let reply_to = reply_to.as_deref().map(parse_message).transpose()?;
-        self.guard_send_target(channel).await?;
+        self.guard_send_target(sender, channel).await?;
         let attachments = self.resolve_attachments(attachment_urls, attachment_refs, attachments_inline)?;
         validate_content(&content, attachments.len(), sticker_ids.len())?;
 
@@ -94,21 +94,16 @@ impl KurouServer {
     // the mouth's gate: once a primary is configured, send_message may only land in a
     // writable guild (primary + secondaries) or a WAKE_DM_FROM recipient's DM. no
     // primary means an unguilded dev crow - nothing to guard.
-    pub(crate) async fn guard_send_target(&self, channel: serenity::model::id::ChannelId) -> Result<(), String> {
+    pub(crate) async fn guard_send_target(&self, sender: &crate::discord::DiscordClient, channel: serenity::model::id::ChannelId) -> Result<(), String> {
         if self.default_guild.is_none() {
             return Ok(());
         }
-        // fail-closed: a probe failure means the primary bot can't even see the channel
-        // (it's in a readonly guild), so treat "can't verify" as "not writable" and refuse.
-        match self.client.channel_guild(channel).await {
-            Ok(Some(guild)) if self.is_writable(guild) => Ok(()),
-            // the private door swings both ways, but only for named knocks
-            Ok(None) => match self.client.dm_recipient(channel).await {
-                Ok(Some(user)) if self.wake_dm_from.contains(&user) => Ok(()),
-                _ => Err(format!(
-                    "refusing to send: channel {channel} is a DM outside WAKE_DM_FROM; the private wire only speaks to named recipients"
-                )),
-            },
+        match sender.channel_target(channel).await {
+            Ok(crate::discord::ChannelTarget::Guild(guild)) if self.is_writable(guild) => Ok(()),
+            Ok(crate::discord::ChannelTarget::Direct(user)) if self.wake_dm_from.contains(&user) => Ok(()),
+            Ok(crate::discord::ChannelTarget::Direct(_)) => Err(format!(
+                "refusing to send: channel {channel} is a DM outside WAKE_DM_FROM; the private wire only speaks to named recipients"
+            )),
             _ => Err(format!(
                 "refusing to send: channel {channel} is not in a writable guild (PRIMARY_GUILD + SECONDARY_GUILDS); readonly guilds have no voice"
             )),

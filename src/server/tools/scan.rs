@@ -11,7 +11,7 @@ use serenity::http::MessagePagination;
 use crate::archive::ScanQuery;
 use crate::discord::types::{RenderedMessage, channel_header, render_messages};
 use crate::server::KurouServer;
-use crate::server::tools::common::{enrich_display_names, parse_channel, parse_message, tool_error};
+use crate::server::tools::common::{caller_identity, enrich_display_names, parse_channel, parse_message, tool_error};
 
 const PAGE_SIZE: u8 = 100;
 const DEFAULT_MAX_PAGES: u8 = 10;
@@ -86,8 +86,10 @@ impl KurouServer {
     pub async fn scan_channel(
         &self,
         Parameters(req): Parameters<ScanChannelRequest>,
+        extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
         let channel = parse_channel(&req.channel_id)?;
+        let identity = caller_identity(&extensions)?;
         let source = parse_source(req.source.as_deref())?;
         if source == Source::Archive && self.message_store.is_none() {
             return Err("message archive is disabled; set ARCHIVE=true or use source=rest".to_string());
@@ -99,9 +101,9 @@ impl KurouServer {
         };
 
         if use_archive {
-            self.scan_via_archive(channel, req).await
+            self.scan_via_archive(&identity, channel, req).await
         } else {
-            self.scan_via_rest(channel, req).await
+            self.scan_via_rest(&identity, channel, req).await
         }
     }
 }
@@ -109,6 +111,7 @@ impl KurouServer {
 impl KurouServer {
     async fn scan_via_archive(
         &self,
+        identity: &str,
         channel: ChannelId,
         req: ScanChannelRequest,
     ) -> Result<String, String> {
@@ -127,8 +130,8 @@ impl KurouServer {
             limit: req.limit.unwrap_or(DEFAULT_ARCHIVE_LIMIT).clamp(1, MAX_ARCHIVE_LIMIT),
         };
 
+        let client = self.client_for_channel(identity, channel).await?;
         let scan = store.scan(query).await.map_err(tool_error)?;
-        let client = self.client_for_channel(channel).await;
         let context = client.channel(channel).await.ok().flatten();
         let floor = scan.floor.map(|id| id.to_string()).unwrap_or_else(|| "none".to_string());
         let meta = format!(
@@ -144,6 +147,7 @@ impl KurouServer {
 
     async fn scan_via_rest(
         &self,
+        identity: &str,
         channel: ChannelId,
         req: ScanChannelRequest,
     ) -> Result<String, String> {
@@ -155,7 +159,7 @@ impl KurouServer {
         let max_pages = req.max_pages.unwrap_or(DEFAULT_MAX_PAGES).clamp(1, MAX_MAX_PAGES);
         let floor = req.after.as_deref().map(parse_message).transpose()?.map(|m| m.get());
         // resolve the bot once so a 50-page sweep doesn't re-probe every page
-        let client = self.client_for_channel(channel).await;
+        let client = self.client_for_channel(identity, channel).await?;
 
         let mut cursor = req.before.as_deref().map(parse_message).transpose()?.map(|m| m.get());
         let mut matches: Vec<Message> = Vec::new();
