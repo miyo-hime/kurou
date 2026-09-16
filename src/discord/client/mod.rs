@@ -135,6 +135,45 @@ impl DiscordClient {
         Ok(channel_id.send_message(&self.http, builder).await?)
     }
 
+    // serenity 0.12 reads duration_secs/waveform but its builders can't write them,
+    // so voice messages go out as one hand-rolled multipart POST. flag 8192 is
+    // IS_VOICE_MESSAGE; discord insists on exactly one audio attachment and no text.
+    pub async fn send_voice_message(
+        &self,
+        channel_id: ChannelId,
+        filename: &str,
+        data: Vec<u8>,
+        duration_secs: f64,
+        waveform_b64: &str,
+        reply_to: Option<MessageId>,
+    ) -> Result<Message> {
+        let mime = audio_mime(filename)?;
+        let mut payload = serde_json::json!({
+            "flags": 8192,
+            "attachments": [{ "id": 0, "filename": filename, "duration_secs": duration_secs, "waveform": waveform_b64 }],
+        });
+        if let Some(target) = reply_to {
+            payload["message_reference"] = serde_json::json!({ "channel_id": channel_id.get().to_string(), "message_id": target.get().to_string() });
+        }
+
+        let token = self.http.token();
+        let auth = if token.starts_with("Bot ") { token.to_string() } else { format!("Bot {token}") };
+        let part = reqwest::multipart::Part::bytes(data).file_name(filename.to_string()).mime_str(mime)?;
+        let form = reqwest::multipart::Form::new().text("payload_json", payload.to_string()).part("files[0]", part);
+        let response = reqwest::Client::new()
+            .post(format!("https://discord.com/api/v10/channels/{}/messages", channel_id.get()))
+            .header("Authorization", auth)
+            .multipart(form)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("discord refused the voice message ({status}): {body}");
+        }
+        Ok(serde_json::from_slice::<Message>(&response.bytes().await?)?)
+    }
+
     pub async fn broadcast_typing(&self, channel_id: ChannelId) -> Result<()> {
         Ok(self.http.broadcast_typing(channel_id).await?)
     }
@@ -263,5 +302,20 @@ impl DiscordClient {
 impl std::fmt::Debug for DiscordClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DiscordClient").finish_non_exhaustive()
+    }
+}
+
+// discord only honors voice metadata when the part's content-type starts with
+// audio/, so unknown extensions get refused here instead of rendering as a
+// plain file card after the fact.
+fn audio_mime(filename: &str) -> Result<&'static str> {
+    let ext = filename.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+    match ext.as_str() {
+        "ogg" | "opus" => Ok("audio/ogg"),
+        "mp3" => Ok("audio/mpeg"),
+        "wav" => Ok("audio/wav"),
+        "flac" => Ok("audio/flac"),
+        "m4a" => Ok("audio/mp4"),
+        _ => anyhow::bail!("'{filename}' does not look like audio the voice widget can play (ogg/opus/mp3/wav/flac/m4a)"),
     }
 }

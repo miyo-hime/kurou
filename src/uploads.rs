@@ -9,6 +9,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -27,7 +28,16 @@ pub struct UploadStore {
 struct Stored {
     filename: String,
     data: Vec<u8>,
+    duration_secs: Option<f64>,
+    waveform: Option<String>,
     expires_at: Instant,
+}
+
+pub struct Upload {
+    pub filename: String,
+    pub data: Vec<u8>,
+    pub duration_secs: Option<f64>,
+    pub waveform: Option<String>,
 }
 
 impl UploadStore {
@@ -38,7 +48,7 @@ impl UploadStore {
         }
     }
 
-    pub fn put(&self, filename: String, data: Vec<u8>) -> String {
+    pub fn put(&self, filename: String, data: Vec<u8>, duration_secs: Option<f64>, waveform: Option<String>) -> String {
         let id = Uuid::new_v4().simple().to_string();
         let mut map = self.inner.lock().expect("upload store mutex poisoned");
         sweep(&mut map);
@@ -47,6 +57,8 @@ impl UploadStore {
             Stored {
                 filename,
                 data,
+                duration_secs,
+                waveform,
                 expires_at: Instant::now() + self.ttl,
             },
         );
@@ -54,14 +66,19 @@ impl UploadStore {
     }
 
     // one upload, one send. taking removes it so a ref can't be replayed.
-    pub fn take(&self, id: &str) -> Option<(String, Vec<u8>)> {
+    pub fn take(&self, id: &str) -> Option<Upload> {
         let mut map = self.inner.lock().expect("upload store mutex poisoned");
         sweep(&mut map);
         let stored = map.remove(id)?;
         if stored.expires_at <= Instant::now() {
             return None;
         }
-        Some((stored.filename, stored.data))
+        Some(Upload {
+            filename: stored.filename,
+            data: stored.data,
+            duration_secs: stored.duration_secs,
+            waveform: stored.waveform,
+        })
     }
 }
 
@@ -88,6 +105,7 @@ pub struct UploadParams {
 pub async fn upload_handler(
     State(store): State<UploadStore>,
     Query(params): Query<UploadParams>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
     let filename = sanitize_filename(&params.filename);
@@ -106,12 +124,17 @@ pub async fn upload_handler(
             ),
         );
     }
+    let (duration_secs, waveform) = match voice_meta(&headers) {
+        Ok(meta) => meta,
+        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+    };
 
     let size = body.len();
-    let id = store.put(filename.clone(), body.to_vec());
+    let voice_ready = duration_secs.is_some() && waveform.is_some();
+    let id = store.put(filename.clone(), body.to_vec(), duration_secs, waveform);
     let ttl_secs = store.ttl.as_secs();
 
-    tracing::info!(%id, filename, size, "stashed upload for send_message");
+    tracing::info!(%id, filename, size, voice_ready, "stashed upload for send_message");
     (
         StatusCode::OK,
         Json(json!({
@@ -119,9 +142,37 @@ pub async fn upload_handler(
             "filename": filename,
             "size": size,
             "expires_in_secs": ttl_secs,
+            "voice_ready": voice_ready,
         })),
     )
         .into_response()
+}
+
+// the companion measures audio at upload time (ffprobe + ffmpeg live on the
+// uploader's box, not the crow's) and ships the results as headers.
+fn voice_meta(headers: &axum::http::HeaderMap) -> Result<(Option<f64>, Option<String>), String> {
+    let duration_secs = match headers.get("x-kurou-duration") {
+        None => None,
+        Some(value) => {
+            let parsed = value.to_str().ok().and_then(|v| v.trim().parse::<f64>().ok());
+            match parsed {
+                Some(secs) if secs > 0.0 => Some(secs),
+                _ => return Err("x-kurou-duration must be a positive number of seconds".to_string()),
+            }
+        }
+    };
+    let waveform = match headers.get("x-kurou-waveform") {
+        None => None,
+        Some(value) => {
+            let raw = value.to_str().map_err(|_| "x-kurou-waveform is not ascii".to_string())?.trim().to_string();
+            let decoded = base64::engine::general_purpose::STANDARD.decode(&raw).map_err(|_| "x-kurou-waveform is not valid base64".to_string())?;
+            if decoded.is_empty() || decoded.len() > 256 {
+                return Err(format!("x-kurou-waveform decodes to {} bytes; discord wants 1-256 datapoints", decoded.len()));
+            }
+            Some(raw)
+        }
+    };
+    Ok((duration_secs, waveform))
 }
 
 // strip any path the caller's basename logic missed. the crow only ever wants a

@@ -45,6 +45,10 @@ pub struct SendMessageRequest {
         description = "inline base64 files. last resort: the bytes ride through the tool call and cost tokens, so prefer a ref or url"
     )]
     pub attachments_inline: Option<Vec<InlineAttachment>>,
+    #[schemars(
+        description = "send as a discord voice message - the inline waveform widget instead of a file card. requires exactly one attachment_ref whose upload came through the kurou-upload companion with audio metadata (it measures duration and sketches the waveform automatically for audio files); content, stickers, urls and inline attachments must all be absent. voice messages cannot be edited once sent"
+    )]
+    pub voice_message: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema, Serialize)]
@@ -71,14 +75,32 @@ impl KurouServer {
             attachment_urls,
             attachment_refs,
             attachments_inline,
+            voice_message,
         }): Parameters<SendMessageRequest>,
         extensions: rmcp::model::Extensions,
     ) -> Result<String, String> {
         let sender = self.sender_for(&caller_identity(&extensions)?)?;
         let channel = parse_channel(&channel_id)?;
-        let sticker_ids = parse_sticker_ids(sticker_ids)?;
         let reply_to = reply_to.as_deref().map(parse_message).transpose()?;
         self.guard_send_target(sender, channel).await?;
+
+        if voice_message.unwrap_or(false) {
+            let reference = validate_voice_request(&content, &sticker_ids, &attachment_urls, &attachment_refs, &attachments_inline)?;
+            let upload = self.upload_store.take(reference).ok_or_else(|| {
+                format!("upload ref '{reference}' is unknown or expired; re-run kurou-upload")
+            })?;
+            let (duration_secs, waveform) = match (upload.duration_secs, upload.waveform) {
+                (Some(duration), Some(waveform)) => (duration, waveform),
+                _ => return Err("this upload carries no audio metadata - re-upload with the current kurou-upload companion (it measures audio files automatically)".to_string()),
+            };
+            let message = sender
+                .send_voice_message(channel, &upload.filename, upload.data, duration_secs, &waveform, reply_to)
+                .await
+                .map_err(tool_error)?;
+            return json_text(&MessageInfo::from(message));
+        }
+
+        let sticker_ids = parse_sticker_ids(sticker_ids)?;
         let attachments = self.resolve_attachments(attachment_urls, attachment_refs, attachments_inline)?;
         validate_content(&content, attachments.len(), sticker_ids.len())?;
 
@@ -123,10 +145,10 @@ impl KurouServer {
         }
 
         for reference in refs.unwrap_or_default() {
-            let (filename, data) = self.upload_store.take(&reference).ok_or_else(|| {
+            let upload = self.upload_store.take(&reference).ok_or_else(|| {
                 format!("upload ref '{reference}' is unknown or expired; re-run kurou-upload")
             })?;
-            sources.push(AttachmentSource::Bytes { filename, data });
+            sources.push(AttachmentSource::Bytes { filename: upload.filename, data: upload.data });
         }
 
         for item in inline.unwrap_or_default() {
@@ -150,6 +172,26 @@ impl KurouServer {
         }
 
         Ok(sources)
+    }
+}
+
+// discord's rules for voice messages, enforced at the door: one audio ref, nothing else.
+fn validate_voice_request<'a>(
+    content: &str,
+    sticker_ids: &Option<Vec<String>>,
+    urls: &Option<Vec<String>>,
+    refs: &'a Option<Vec<String>>,
+    inline: &Option<Vec<InlineAttachment>>,
+) -> Result<&'a str, String> {
+    if !content.trim().is_empty() {
+        return Err("a voice message cannot carry text content; send it as its own message".to_string());
+    }
+    if sticker_ids.as_ref().is_some_and(|ids| !ids.is_empty()) || urls.as_ref().is_some_and(|u| !u.is_empty()) || inline.as_ref().is_some_and(|i| !i.is_empty()) {
+        return Err("a voice message allows no stickers, attachment_urls, or inline attachments - exactly one attachment_ref".to_string());
+    }
+    match refs.as_deref() {
+        Some([reference]) => Ok(reference),
+        _ => Err("a voice message needs exactly one attachment_ref from the kurou-upload companion".to_string()),
     }
 }
 

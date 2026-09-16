@@ -1,6 +1,6 @@
 [package]
 name = "kurou"
-version = "0.27.0"
+version = "0.28.0"
 edition = "2024"
 
 [dependencies]
@@ -9,7 +9,7 @@ axum = { version = "0.8", default-features = false, features = ["form", "http1",
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env"] }
 hmac = "0.12"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart"] }
 rmcp = { version = "1.8", features = ["transport-io", "transport-streamable-http-server"] }
 # the ledger engine. boring on purpose - the beta-engine era cost us a segment
 # graveyard, a 3.8GB leak, and ~3 messages a day. bundled so the pi needs nothing.
